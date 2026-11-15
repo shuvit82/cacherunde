@@ -1,0 +1,4547 @@
+const FOOT_ROUTER="/api/foot";
+const CAR_ROUTER="/api/car";
+const OVERPASS="/api/overpass";
+const ELEVATION="/api/elevation";
+const LANDCOVER="/api/landcover";
+const ROUTER_DELAY_MS=1100;
+const APP_VERSION="0.13.0";
+const DATA_VERSION=1;
+const DEFAULT_APP_SETTINGS={
+  radius:10,
+  maxGap:15,
+  maxTime:240,
+  speed:4.5,
+  stopTime:5,
+  minCaches:0
+};
+
+const state = {
+  caches: [],
+  gpxImportStats:{waypoints:0,caches:0,ignoredWaypoints:0},
+  profile: {gcUsername:"",csUsername:"",profileUrl:"https://www.geocaching.com/p/default.aspx?guid=363b1243-156e-4600-ade9-81c58d8b57b4",knownGermanyRank:52364},
+  manualStats:{},
+  apiConnected:false,
+  gcProvider:null,
+  pendingLogs:[],
+  savedTours:[],
+  activeTour:null,
+  tripOrigin:null,
+  savedTrips:[],
+  currentTripPlan:null,
+  tripCandidatePool:[],
+  lodgingCandidates:[],
+  selectedLodging:null,
+  googlePlaces:{enabled:false,key:""},
+  appSettings:{...DEFAULT_APP_SETTINGS},
+  searchLocation:null,
+  originExplicit: false,
+  cacheCentroid: null,
+  routes: [],
+  selectedRoute: null,
+  routeEditBusy:false,
+  parkingPickLockSequence:false,
+  mapPlanner:{active:false,selectedIds:new Set(),sourceRoute:null},
+  map: null,
+  layers: {caches:null, route:null},
+  deferredPrompt: null
+};
+
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+
+function haversine(a,b){
+  const R=6371, toR=x=>x*Math.PI/180;
+  const dLat=toR(b.lat-a.lat), dLon=toR(b.lon-a.lon);
+  const la1=toR(a.lat), la2=toR(b.lat);
+  const h=Math.sin(dLat/2)**2+Math.cos(la1)*Math.cos(la2)*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(h));
+}
+
+function normalizeType(raw=""){
+  const s=raw.toLowerCase();
+  if(s.includes("multi")) return "Multi";
+  if(s.includes("unknown")||s.includes("mystery")||s.includes("puzzle")) return "Mystery";
+  if(s.includes("traditional")) return "Traditional";
+  return raw || "Unknown";
+}
+
+function xmlText(el, selector){
+  const n=el.querySelector(selector);
+  return n ? n.textContent.trim() : "";
+}
+
+function parseGPX(text){
+  const xml=new DOMParser().parseFromString(text,"application/xml");
+  const allWpts=[...xml.querySelectorAll("wpt")];
+
+  function directCacheNode(w){
+    // Only true cache waypoints contain a Groundspeak <cache> child.
+    // Parking, trailhead, reference and stage waypoints are auxiliary and
+    // intentionally excluded from round planning.
+    return [...w.children].find(el=>el.localName==="cache") || null;
+  }
+
+  function childTextByLocalName(root,name){
+    if(!root)return "";
+    const n=[...root.children].find(el=>el.localName===name);
+    return n?n.textContent.trim():"";
+  }
+
+  const cacheWpts=allWpts.filter(w=>!!directCacheNode(w));
+  state.gpxImportStats={
+    waypoints:allWpts.length,
+    caches:cacheWpts.length,
+    ignoredWaypoints:Math.max(0,allWpts.length-cacheWpts.length)
+  };
+
+  return cacheWpts.map((w,i)=>{
+    const lat=parseFloat(w.getAttribute("lat"));
+    const lon=parseFloat(w.getAttribute("lon"));
+    const name=xmlText(w,"name")||`GC-${i+1}`;
+    const sym=xmlText(w,"sym");
+    const cacheNode=directCacheNode(w);
+
+    const cacheTypeRaw=childTextByLocalName(cacheNode,"type");
+    const type=normalizeType(cacheTypeRaw);
+
+    const correctedTags=["corrected","final","corrected_coordinates","final_coordinates"];
+    const corrected=correctedTags.some(t=>
+      [...w.getElementsByTagNameNS("*",t)].some(n=>/true|1|yes/i.test(n.textContent))
+    );
+
+    const explicitFound=[...w.getElementsByTagNameNS("*","found")]
+      .some(n=>/true|1|yes/i.test(n.textContent));
+    const found=explicitFound || /geocache found/i.test(sym);
+
+    const ele=parseFloat(xmlText(w,"ele"));
+    const difficulty=parseFloat(childTextByLocalName(cacheNode,"difficulty"));
+    const terrain=parseFloat(childTextByLocalName(cacheNode,"terrain"));
+    const cacheName=childTextByLocalName(cacheNode,"name") || xmlText(w,"desc") || name;
+
+    const logs=[...w.getElementsByTagNameNS("*","log")].map(log=>{
+      const finder=[...log.getElementsByTagNameNS("*","finder")][0]?.textContent?.trim()||"";
+      const logType=[...log.getElementsByTagNameNS("*","type")][0]?.textContent?.trim()||"";
+      const date=[...log.getElementsByTagNameNS("*","date")][0]?.textContent?.trim()||"";
+      return {finder,type:logType,date};
+    });
+
+    return {
+      id:name,
+      name:cacheName,
+      lat,lon,
+      type,
+      rawCacheType:cacheTypeRaw || "(kein Cachetyp erkannt)",
+      found,
+      corrected,
+      logs,
+      ele:Number.isFinite(ele)?ele:null,
+      difficulty:Number.isFinite(difficulty)?difficulty:null,
+      terrain:Number.isFinite(terrain)?terrain:null
+    };
+  }).filter(c=>Number.isFinite(c.lat)&&Number.isFinite(c.lon));
+}
+
+function parseLogDate(value){
+  const d=value?new Date(value):null;
+  return d && Number.isFinite(d.getTime())?d:null;
+}
+
+function cacheHealth(cache){
+  const logs=Array.isArray(cache.logs)?cache.logs:[];
+  let lastFound=null,lastDnf=null;
+  for(const log of logs){
+    const d=parseLogDate(log.date);
+    const t=(log.type||"").toLowerCase();
+    if(!d)continue;
+    if(t.includes("found it")){
+      if(!lastFound || d>lastFound)lastFound=d;
+    }
+    if(t.includes("didn't find") || t.includes("did not find") || t==="dnf"){
+      if(!lastDnf || d>lastDnf)lastDnf=d;
+    }
+  }
+
+  const unresolvedDnf=!!lastDnf && (!lastFound || lastDnf>lastFound);
+  const ageDays=lastFound?Math.floor((Date.now()-lastFound.getTime())/86400000):null;
+  const staleFound=ageDays!=null && ageDays>=60;
+  const reasons=[];
+
+  if(unresolvedDnf){
+    reasons.push(`DNF vom ${lastDnf.toLocaleDateString("de-DE")}`);
+  }
+  if(staleFound){
+    reasons.push(`letzter Found-Log vor ${ageDays} Tagen`);
+  }
+
+  return {
+    warn:reasons.length>0,
+    unresolvedDnf,
+    staleFound,
+    reasons,
+    lastFound,
+    lastDnf,
+    ageDays
+  };
+}
+
+function routeHealthWarnings(route){
+  const seq=route.real?.finalSequence || cacheSequence(route);
+  const seen=new Set();
+  return seq.filter(c=>{
+    if(seen.has(c.id))return false;
+    seen.add(c.id);
+    return cacheHealth(c).warn;
+  }).map(c=>({cache:c,health:cacheHealth(c)}));
+}
+
+function routeHealthHtml(route){
+  const warnings=routeHealthWarnings(route);
+  if(!warnings.length)return "";
+  const items=warnings.slice(0,5).map(x=>
+    `${escapeHtml(x.cache.id)}: ${x.health.reasons.map(escapeHtml).join(" · ")}`
+  );
+  const more=warnings.length>5?` · +${warnings.length-5} weitere`:"";
+  return `<div class="route-health-box"><strong>⚠ ${warnings.length} Cache(s) mit Hinweis</strong>${items.join("<br>")}${more}</div>`;
+}
+
+function filteredCaches(opts){
+  const start=opts.start;
+  return state.caches.filter(c=>{
+    if(haversine(start,c)>opts.radius) return false;
+    if(opts.excludeFound && c.found) return false;
+    if(c.type==="Traditional" && !opts.tradis) return false;
+    if(c.type==="Multi" && !opts.multis) return false;
+    if(c.type==="Mystery" && (!opts.mysteries || !c.corrected)) return false;
+    if(!["Traditional","Mystery","Multi"].includes(c.type)) return false;
+    return true;
+  });
+}
+
+function routeStats(points, opts){
+  let km=0, gain=0, loss=0;
+  for(let i=1;i<points.length;i++){
+    const direct=haversine(points[i-1],points[i]);
+    km += direct*1.15; // prototype trail factor
+    const e1=points[i-1].ele, e2=points[i].ele;
+    if(Number.isFinite(e1)&&Number.isFinite(e2)){
+      const d=e2-e1; if(d>0) gain+=d; else loss+=Math.abs(d);
+    }
+  }
+  const cachePoints=points.filter(p=>p && p.id);
+  const uniqueCacheIds=new Set(cachePoints.map(p=>p.id));
+  const cacheCount=uniqueCacheIds.size;
+  const walkMin=km/opts.speed*60;
+  const totalMin=walkMin + cacheCount*opts.stopTime;
+  return {km,gain,loss,cacheCount,walkMin,totalMin};
+}
+
+function cacheTravelMinutes(a,b,opts){
+  return haversine(a,b)*1.15/opts.speed*60;
+}
+
+function buildGraph(candidates,opts){
+  const graph=new Map(candidates.map(c=>[c,[]]));
+  let edges=0;
+  for(let i=0;i<candidates.length;i++){
+    for(let j=i+1;j<candidates.length;j++){
+      const min=cacheTravelMinutes(candidates[i],candidates[j],opts);
+      if(min<=opts.maxGap){
+        graph.get(candidates[i]).push({c:candidates[j],min});
+        graph.get(candidates[j]).push({c:candidates[i],min});
+        edges++;
+      }
+    }
+  }
+  return {graph,edges};
+}
+
+function connectedComponents(candidates,graph){
+  const seen=new Set(), comps=[];
+  for(const start of candidates){
+    if(seen.has(start)) continue;
+    const comp=[], stack=[start]; seen.add(start);
+    while(stack.length){
+      const cur=stack.pop(); comp.push(cur);
+      for(const n of graph.get(cur)||[]){
+        if(!seen.has(n.c)){seen.add(n.c);stack.push(n.c);}
+      }
+    }
+    comps.push(comp);
+  }
+  return comps.sort((a,b)=>b.length-a.length);
+}
+
+function makeRouteFromSeed(seed,component,graph,opts,variant=0){
+  const componentSet=new Set(component);
+  const path=[seed];
+  const used=new Set([seed]);
+  let current=seed;
+
+  while(true){
+    const choices=(graph.get(current)||[])
+      .filter(x=>componentSet.has(x.c) && !used.has(x.c))
+      .map(x=>{
+        const onward=(graph.get(x.c)||[]).filter(n=>componentSet.has(n.c) && !used.has(n.c)).length;
+        return {...x,onward};
+      })
+      .sort((a,b)=>{
+        const sa=a.min-a.onward*0.35;
+        const sb=b.min-b.onward*0.35;
+        return sa-sb;
+      });
+
+    if(!choices.length)break;
+
+    const pick=choices[Math.min(variant%Math.min(4,choices.length),choices.length-1)].c;
+
+    // Preliminary planning is an OPEN cache chain. The return to parking is
+    // only added during real routing and does not need to contain more caches.
+    const trial=[...path,pick];
+    const st=routeStats(trial,opts);
+    if(st.totalMin>opts.maxTime)break;
+
+    path.push(pick);
+    used.add(pick);
+    current=pick;
+    if(path.length>=80)break;
+  }
+
+  if(path.length<2)return null;
+
+  const stats=routeStats(path,opts);
+  if(stats.totalMin>opts.maxTime*1.03)return null;
+  return path;
+}
+
+function buildRoutes(opts){
+  const candidates=filteredCaches(opts);
+  $("#miniCandidateCount").textContent=candidates.length;
+  const dbg=document.getElementById("searchDebug");
+  if(dbg) dbg.textContent=`Geeignet im Radius: ${candidates.length}`;
+
+  const {graph,edges}=buildGraph(candidates,opts);
+  const components=connectedComponents(candidates,graph);
+  const linkedCandidates=candidates.filter(c=>(graph.get(c)||[]).length>0).length;
+
+  const rawInRadius=state.caches.filter(c=>haversine(opts.start,c)<=opts.radius);
+  const typeCounts={};
+  const rawTypeCounts={};
+  rawInRadius.forEach(c=>{
+    typeCounts[c.type]=(typeCounts[c.type]||0)+1;
+    rawTypeCounts[c.rawCacheType||"(leer)"]=(rawTypeCounts[c.rawCacheType||"(leer)"]||0)+1;
+  });
+
+  const diagnostics = {
+    imported: state.caches.length,
+    rawInRadius: rawInRadius.length,
+    typeCounts,
+    rawTypeCounts,
+    nearestKm: state.caches.length ? Math.min(...state.caches.map(c=>haversine(opts.start,c))) : null,
+    foundExcluded: state.caches.filter(c=>opts.excludeFound && c.found && haversine(opts.start,c)<=opts.radius).length,
+    mysteryWithoutFinal: state.caches.filter(c=>c.type==="Mystery" && !c.corrected && haversine(opts.start,c)<=opts.radius).length,
+    multiExcluded: state.caches.filter(c=>c.type==="Multi" && !opts.multis && haversine(opts.start,c)<=opts.radius).length,
+    candidates: candidates.length,
+    linkedCandidates,
+    edges,
+    components: components.length,
+    largestComponent: components[0]?.length||0
+  };
+  state.lastDiagnostics=diagnostics;
+
+  const routes=[];
+  if(candidates.length<2) return routes;
+
+  // Search the largest useful cache clusters first. The search center is NOT included
+  // in walking time; it is only used to rank how far the found round is from the user.
+  for(const comp of components.filter(c=>c.length>=2).slice(0,20)){
+    const seeds=[...comp].sort((a,b)=>haversine(opts.start,a)-haversine(opts.start,b)).slice(0,Math.min(20,comp.length));
+    seeds.forEach((seed,seedIndex)=>{
+      for(let variant=0;variant<5;variant++){
+        const cycle=makeRouteFromSeed(seed,comp,graph,opts,seedIndex+variant);
+        if(!cycle) continue;
+        const stats=routeStats(cycle,opts);
+        const centroid={
+          lat:cycle.reduce((s,c)=>s+c.lat,0)/cycle.length,
+          lon:cycle.reduce((s,c)=>s+c.lon,0)/cycle.length
+        };
+        const dist=haversine(opts.start,centroid);
+        routes.push({
+          id:`r-${routes.length}-${Date.now()}`,
+          name:["Beste Runde","Cache-Kompakt","Wald & Panorama","Feierabendrunde","Höhenrunde"][routes.length%5],
+          points:cycle,
+          stats,
+          startDistance:dist,
+          score:Math.round(stats.cacheCount*100/Math.max(1,stats.totalMin))
+        });
+      }
+    });
+  }
+
+  const unique=[];
+  const sigs=new Set();
+  for(const r of routes){
+    // preserve direction-independent membership uniqueness for prototype
+    const sig=r.points.map(p=>p.id).sort().join("|");
+    if(!sigs.has(sig)){sigs.add(sig);unique.push(r);}
+  }
+
+  // Candidate selection is quality-first. Distance remains an explicit sort option,
+  // but no longer decides which 12 candidates survive the initial search.
+  const minCaches=opts.minCaches||0;
+  const filteredByCount=minCaches>0 ? unique.filter(r=>(r.stats?.cacheCount||0)>=minCaches) : unique;
+  return sortRoutes(filteredByCount,"quality").slice(0,12);
+}
+
+function diagnosticsHtml(){
+  const d=state.lastDiagnostics||{};
+  const tips=[];
+  if((d.rawInRadius||0)===0){
+    tips.push(`Kein importierter Cache liegt im gewählten Suchradius. Der Suchpunkt liegt vermutlich außerhalb des Cachegebiets. Nutze „Zum Cachegebiet“ oder erhöhe den Radius.`);
+  } else if((d.candidates||0)===0){
+    if((d.foundExcluded||0)>0) tips.push(`${d.foundExcluded} bereits gefundene Caches wurden ausgeschlossen.`);
+    if((d.mysteryWithoutFinal||0)>0) tips.push(`${d.mysteryWithoutFinal} Mysterys haben kein erkanntes Final.`);
+    if((d.multiExcluded||0)>0) tips.push(`${d.multiExcluded} Multis sind derzeit ausgeschlossen.`);
+  } else if((d.linkedCandidates||0)<3){
+    tips.push(`Nur ${d.linkedCandidates||0} geeignete Caches besitzen überhaupt einen weiteren Cache innerhalb von ${$("#maxGap")?.value||15} Minuten.`);
+  } else if((d.largestComponent||0)<3){
+    tips.push("Es gibt keinen zusammenhängenden Cluster aus mindestens drei geeigneten Caches.");
+  } else {
+    tips.push(`Größter zusammenhängender Cache-Cluster: ${d.largestComponent} Caches. Es wurde aber keine Route innerhalb der Zeitgrenze aufgebaut.`);
+  }
+  return `<div class="diag">
+    <strong>Suchdiagnose</strong>
+    <div>Importiert: ${d.imported||0} · <strong>Im Suchradius vor Filtern: ${d.rawInRadius||0}</strong> · Geeignet danach: ${d.candidates||0}</div>
+    <div>Nächster importierter Cache: ${d.nearestKm==null?"—":d.nearestKm.toFixed(1)+" km"} · Erkannte Cachetypen: ${Object.entries(d.typeCounts||{}).map(([k,v])=>`${k}: ${v}`).join(" · ")||"—"}</div>
+    <div>Rohwerte aus groundspeak:cache/type: ${Object.entries(d.rawTypeCounts||{}).slice(0,12).map(([k,v])=>`${k}: ${v}`).join(" · ")||"—"}</div>
+    <div>Mit 15-Min.-Nachbar: ${d.linkedCandidates||0}</div>
+    <div>Verbindungen: ${d.edges||0} · Cluster: ${d.components||0} · größter Cluster: ${d.largestComponent||0}</div>
+    <div>Gefunden ausgeschlossen: ${d.foundExcluded||0} · Mystery ohne Final: ${d.mysteryWithoutFinal||0} · Multis ausgeschlossen: ${d.multiExcluded||0}</div>
+    ${tips.map(t=>`<div><strong>Hinweis:</strong> ${t}</div>`).join("")}
+  </div>`;
+}
+
+function getOpts(quick=false){
+  const start={lat:parseFloat($("#startLat").value),lon:parseFloat($("#startLon").value),ele:null};
+  return quick ? {
+    start, radius:+$("#quickRadius").value, maxGap:+$("#quickGap").value, maxTime:+$("#quickMaxTime").value,
+    speed:4.5, stopTime:5, excludeFound:true, tradis:true, mysteries:true, multis:false,
+    minCaches:+($("#quickMinCaches")?.value||0),
+    parkingMode:$("#quickParkingMode")?.value||"fallback"
+  } : {
+    start, radius:+$("#radius").value, maxGap:+$("#maxGap").value, maxTime:+$("#maxTime").value,
+    speed:+$("#speed").value, stopTime:+$("#stopTime").value,
+    excludeFound:$("#excludeFound").checked, tradis:$("#tradis").checked,
+    mysteries:$("#mysteries").checked, multis:$("#multis").checked,
+    minCaches:+($("#minCaches")?.value||0),
+    parkingMode:$("#parkingMode")?.value||"fallback"
+  };
+}
+
+function routeCacheRate(route){
+  const s=previewStats(route);
+  return s.totalMin>0 ? s.cacheCount/(s.totalMin/60) : 0;
+}
+
+function routeQualityScore(route){
+  const s=previewStats(route);
+  const rate=routeCacheRate(route);
+  const sizeBonus=Math.sqrt(Math.max(0,s.cacheCount))*5;
+  const usefulLength=Math.min(12,Math.max(0,s.km))*0.35;
+  const violations=(route.real?.violations ?? route.precheck?.violations ?? 0);
+  const overlap=(route.real?.overlapRatio ?? route.precheck?.overlapRatio ?? 0);
+  return rate*10 + sizeBonus + usefulLength - violations*18 - overlap*8;
+}
+
+function sortRoutes(routes, mode="quality"){
+  const r=[...routes];
+  if(mode==="quality"){
+    r.sort((a,b)=>routeQualityScore(b)-routeQualityScore(a) || routeCacheRate(b)-routeCacheRate(a));
+  }else if(mode==="cacheRate"){
+    r.sort((a,b)=>routeCacheRate(b)-routeCacheRate(a) || previewStats(b).cacheCount-previewStats(a).cacheCount);
+  }else if(mode==="roundSize"){
+    r.sort((a,b)=>previewStats(b).cacheCount-previewStats(a).cacheCount || previewStats(b).km-previewStats(a).km);
+  }else if(mode==="duration"){
+    r.sort((a,b)=>previewStats(a).totalMin-previewStats(b).totalMin);
+  }else if(mode==="caches"){
+    r.sort((a,b)=>previewStats(b).cacheCount-previewStats(a).cacheCount);
+  }else if(mode==="length"){
+    r.sort((a,b)=>previewStats(a).km-previewStats(b).km);
+  }else if(mode==="elevation"){
+    r.sort((a,b)=>previewStats(a).gain-previewStats(b).gain);
+  }else{
+    r.sort((a,b)=>a.startDistance-b.startDistance);
+  }
+  return r;
+}
+
+function fmtMin(m){ const h=Math.floor(m/60), mm=Math.round(m%60); return h?`${h} h ${String(mm).padStart(2,"0")} min`:`${mm} min`; }
+
+
+function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
+
+
+let toastTimer=null;
+function showToast(message,type="info",timeout=3200){
+  const t=$("#toast");
+  if(!t)return;
+  clearTimeout(toastTimer);
+  t.textContent=message;
+  t.className=`toast ${type}`;
+  toastTimer=setTimeout(()=>t.classList.add("hidden"),timeout);
+}
+
+function safeJsonParse(raw,fallback){
+  try{return JSON.parse(raw);}catch(e){return fallback;}
+}
+
+function storageSummary(){
+  const keys=["cacherunde-saved-tours","cacherunde-saved-trips","cacherunde-pending-logs","cacherunde-active-tour","cacherunde-profile","cacherunde-app-settings"];
+  let chars=0;
+  keys.forEach(k=>chars+=(localStorage.getItem(k)||"").length);
+  return {kb:chars*2/1024};
+}
+
+function loadAppSettings(){
+  const cfg=safeJsonParse(localStorage.getItem("cacherunde-app-settings"),{});
+  state.appSettings={...DEFAULT_APP_SETTINGS,...cfg};
+  const map={
+    settingsRadius:"radius",settingsMaxGap:"maxGap",settingsMaxTime:"maxTime",
+    settingsSpeed:"speed",settingsStopTime:"stopTime",settingsMinCaches:"minCaches"
+  };
+  Object.entries(map).forEach(([id,key])=>{const el=$("#"+id);if(el)el.value=String(state.appSettings[key]);});
+  applySettingsToSearchForms();
+}
+
+function applySettingsToSearchForms(){
+  const s=state.appSettings;
+  const set=(id,v)=>{const el=$("#"+id);if(el)el.value=String(v);};
+  set("radius",s.radius);set("quickRadius",s.radius);
+  set("maxGap",s.maxGap);set("quickGap",s.maxGap);
+  set("maxTime",s.maxTime);set("quickMaxTime",s.maxTime);
+  set("speed",s.speed);set("stopTime",s.stopTime);
+  set("minCaches",s.minCaches);set("quickMinCaches",s.minCaches);
+}
+
+function saveAppSettings(){
+  state.appSettings={
+    radius:+$("#settingsRadius").value,
+    maxGap:+$("#settingsMaxGap").value,
+    maxTime:+$("#settingsMaxTime").value,
+    speed:+$("#settingsSpeed").value,
+    stopTime:+$("#settingsStopTime").value,
+    minCaches:+$("#settingsMinCaches").value
+  };
+  localStorage.setItem("cacherunde-app-settings",JSON.stringify(state.appSettings));
+  localStorage.setItem("cacherunde-data-version",String(DATA_VERSION));
+  applySettingsToSearchForms();
+  $("#settingsStatus").textContent=`Datenformat v${DATA_VERSION} · Standardwerte gespeichert.`;
+  showToast("Standardwerte gespeichert.","success");
+}
+
+function migrateLocalData(){
+  const current=+(localStorage.getItem("cacherunde-data-version")||0);
+  if(current<1){
+    localStorage.setItem("cacherunde-data-version","1");
+  }
+}
+
+function buildBackup(){
+  return {
+    app:"CacheRunde",
+    appVersion:APP_VERSION,
+    dataVersion:DATA_VERSION,
+    exportedAt:new Date().toISOString(),
+    profile:safeJsonParse(localStorage.getItem("cacherunde-profile"),{}),
+    appSettings:safeJsonParse(localStorage.getItem("cacherunde-app-settings"),DEFAULT_APP_SETTINGS),
+    googlePlaces:safeJsonParse(localStorage.getItem("cacherunde-google-places"),{}),
+    savedTours:state.savedTours,
+    savedTrips:state.savedTrips,
+    pendingLogs:state.pendingLogs,
+    activeTour:state.activeTour
+  };
+}
+
+function exportBackup(){
+  const text=JSON.stringify(buildBackup(),null,2);
+  const url=URL.createObjectURL(new Blob([text],{type:"application/json"}));
+  const a=document.createElement("a");
+  a.href=url;a.download=`cacherunde-backup-${new Date().toISOString().slice(0,10)}.json`;a.click();
+  URL.revokeObjectURL(url);
+  showToast("Backup exportiert.","success");
+}
+
+async function importBackupFile(file){
+  try{
+    const data=JSON.parse(await file.text());
+    if(data.app!=="CacheRunde")throw new Error("Kein CacheRunde-Backup.");
+    if(data.dataVersion>DATA_VERSION)throw new Error("Backup stammt aus einer neueren Datenversion.");
+    if(data.profile)localStorage.setItem("cacherunde-profile",JSON.stringify(data.profile));
+    if(data.appSettings)localStorage.setItem("cacherunde-app-settings",JSON.stringify(data.appSettings));
+    if(data.googlePlaces)localStorage.setItem("cacherunde-google-places",JSON.stringify(data.googlePlaces));
+    state.savedTours=Array.isArray(data.savedTours)?data.savedTours:[];
+    state.savedTrips=Array.isArray(data.savedTrips)?data.savedTrips:[];
+    state.pendingLogs=Array.isArray(data.pendingLogs)?data.pendingLogs:[];
+    state.activeTour=data.activeTour||null;
+    persistTourState();
+    migrateLocalData();
+    loadProfile();
+    loadGooglePlacesSettings();
+    loadAppSettings();
+    renderSavedTours();renderSavedTrips();renderActiveTour();updateLogQueueStatus();
+    showToast("Backup erfolgreich importiert.","success");
+  }catch(e){
+    showToast(`Backup konnte nicht importiert werden: ${e.message}`,"error",5000);
+  }
+}
+
+function renameSavedTour(t){
+  const name=prompt("Neuer Name der Tour:",t.displayName||t.name||"");
+  if(!name?.trim())return;
+  t.displayName=name.trim();t.name=name.trim();persistTourState();renderSavedTours();
+}
+function duplicateSavedTour(t){
+  const copy=JSON.parse(JSON.stringify(t));
+  copy.id=`saved-${Date.now()}`;
+  copy.displayName=`${t.displayName||t.name} · Kopie`;
+  copy.savedAt=new Date().toISOString();
+  state.savedTours.unshift(copy);persistTourState();renderSavedTours();
+}
+function renameSavedTrip(t){
+  const name=prompt("Neuer Name der Reise:",t.name||"");
+  if(!name?.trim())return;
+  t.name=name.trim();persistTourState();renderSavedTrips();
+}
+function duplicateSavedTrip(t){
+  const copy=JSON.parse(JSON.stringify(t));
+  copy.id=`trip-${Date.now()}`;copy.name=`${t.name} · Kopie`;copy.createdAt=new Date().toISOString();
+  state.savedTrips.unshift(copy);persistTourState();renderSavedTrips();
+}
+
+async function refreshSystemStatus(){
+  const setText=(selector,text)=>{const el=$(selector);if(el)el.textContent=text;};
+  const setClass=(selector,value)=>{const el=$(selector);if(el)el.className=value;};
+  const online=navigator.onLine;
+
+  setText("#systemNetwork",online?"Online":"Offline");
+  setText("#networkBadge",online?"Netz: online":"Netz: offline");
+  setClass("#networkBadge",`status-chip ${online?"ok":"warn"}`);
+  setText("#systemRouting",online?"bereit":"offline");
+  setText("#systemGoogle",state.googlePlaces.enabled&&state.googlePlaces.key?"aktiv":"optional");
+  setText("#systemGc",state.apiConnected?"verbunden":"Test/aus");
+  const storage=storageSummary();
+  setText("#systemStorage",`${storage.kb.toFixed(0)} KB`);
+
+  try{
+    const r=await fetch("/api/status",{cache:"no-store"});
+    const d=await r.json();
+    setText("#systemMaps",`${d.tileCount||0} Kacheln`);
+    setText("#offlineBadge",`Offline: ${d.tileCount||0} Kacheln`);
+    setClass("#offlineBadge","status-chip ok");
+  }catch(e){
+    setText("#systemMaps","unbekannt");
+    setText("#offlineBadge","Offline: ?");
+    setClass("#offlineBadge","status-chip warn");
+  }
+}
+
+function updateNetworkStatus(){
+  const online=navigator.onLine;
+  const badge=$("#networkBadge");
+  if(badge){
+    badge.textContent=online?"Netz: online":"Netz: offline";
+    badge.className=`status-chip ${online?"ok":"warn"}`;
+  }
+  if(!online)showToast("Offline: Routing, Ortsuche und neue Unterkunftsdaten benötigen Internet.","warn",5000);
+  refreshSystemStatus().catch(()=>{});
+}
+
+function setProgress(percent,text,title="CacheRunde arbeitet …"){
+  const box=$("#globalProgress");
+  if(!box)return;
+  box.classList.remove("hidden");
+  $("#progressTitle").textContent=title;
+  $("#progressPercent").textContent=`${Math.max(0,Math.min(100,Math.round(percent)))} %`;
+  $("#progressBar").style.width=`${Math.max(0,Math.min(100,percent))}%`;
+  $("#progressText").textContent=text||"";
+}
+function finishProgress(text="Fertig."){
+  setProgress(100,text,"Fertig");
+  setTimeout(()=>$("#globalProgress")?.classList.add("hidden"),2200);
+}
+function failProgress(text){
+  setProgress(100,text||"Fehler","Vorgang beendet");
+  setTimeout(()=>$("#globalProgress")?.classList.add("hidden"),4500);
+}
+
+
+function cacheSequence(route){
+  const pts=route.points.filter(p=>p && p.id);
+  if(pts.length>1 && pts[0].id===pts[pts.length-1].id) return pts.slice(0,-1);
+  return pts;
+}
+
+function validRoutingPoint(p){
+  return !!p && Number.isFinite(+p.lat) && Number.isFinite(+p.lon);
+}
+function zeroWalkingRoute(point){
+  return {
+    distance:0,duration:0,legs:[],
+    geometry:{type:"LineString",coordinates:[[+point.lon,+point.lat]]}
+  };
+}
+async function footRouteRequest(points, steps=false){
+  if(!Array.isArray(points) || points.length<2 || points.some(p=>!validRoutingPoint(p))){
+    throw new Error("Ungültige Koordinaten für Fußrouting.");
+  }
+  const coords=points.map(p=>`${p.lon},${p.lat}`).join(";");
+  const url=`${FOOT_ROUTER}?coords=${encodeURIComponent(coords)}&steps=${steps?"true":"false"}`;
+  const res=await fetch(url,{cache:"no-store"});
+  if(!res.ok){
+    const detail=await res.text().catch(()=> "");
+    throw new Error(`Fußrouting HTTP ${res.status}${detail?": "+detail.slice(0,180):""}`);
+  }
+  const data=await res.json();
+  const route=data?.routes?.[0];
+  if(data?.code!=="Ok" || !route)throw new Error(data?.message||data?.code||"Keine Fußroute");
+  if(!route.geometry || !Array.isArray(route.geometry.coordinates)){
+    throw new Error("Fußrouting lieferte keine gültige Geometrie.");
+  }
+  return route;
+}
+async function connectorRoute(a,b){
+  if(!validRoutingPoint(a) || !validRoutingPoint(b)){
+    throw new Error("Start/Ziel für Parkplatz-Verbindung fehlt.");
+  }
+  if(haversine(a,b)<0.003)return zeroWalkingRoute(a);
+  const r=await footRouteRequest([a,b],false);
+  if(!r)throw new Error("Parkplatz-Verbindung lieferte kein Ergebnis.");
+  return r;
+}
+
+async function footRouteSequence(points){
+  const CHUNK=20;
+  let totalDistance=0,totalDuration=0,legDurations=[],coordinates=[];
+  for(let start=0;start<points.length-1;start+=CHUNK-1){
+    const chunk=points.slice(start,Math.min(points.length,start+CHUNK));
+    if(chunk.length<2) break;
+    const r=await footRouteRequest(chunk,false);
+    if(!r)throw new Error("Fußrouting lieferte ein leeres Routenergebnis.");
+    totalDistance+=r.distance||0;
+    totalDuration+=r.duration||0;
+    legDurations.push(...(r.legs||[]).map(l=>l?.duration||0));
+    const g=r.geometry?.coordinates||[];
+    if(coordinates.length && g.length) coordinates.push(...g.slice(1)); else coordinates.push(...g);
+    if(start+CHUNK < points.length) await sleep(ROUTER_DELAY_MS);
+  }
+  return {distance:totalDistance,duration:totalDuration,legDurations,geometry:{type:"LineString",coordinates}};
+}
+
+async function findParkingCandidates(first,last,sequence=null,parkingMode="fallback"){
+  const pts=sequence?.length?sequence:[first,last];
+  const center=pts.reduce((a,p)=>({lat:a.lat+p.lat/pts.length,lon:a.lon+p.lon/pts.length}),{lat:0,lon:0});
+  const spreadKm=Math.max(0,...pts.map(p=>haversine(center,p)));
+  const radius=Math.round(Math.max(2500,Math.min(7500,(spreadKm+1.3)*1000)));
+
+  async function fetchJson(url){
+    const res=await fetch(url,{cache:"no-store"});
+    if(!res.ok){
+      const detail=await res.text().catch(()=> "");
+      throw new Error(`Parkplatzsuche HTTP ${res.status}${detail?": "+detail.slice(0,180):""}`);
+    }
+    return res.json();
+  }
+
+  let designated=[];
+  try{
+    const d=await fetchJson(`/api/parking?lat=${encodeURIComponent(center.lat)}&lon=${encodeURIComponent(center.lon)}&radius=${radius}`);
+    designated=d.results||[];
+  }catch(e){
+    if(parkingMode==="designated")throw e;
+  }
+
+  let roadside=[];
+  const needRoadside=parkingMode==="roadside" || (parkingMode==="fallback" && designated.length<3);
+  if(needRoadside){
+    try{
+      const d=await fetchJson(`/api/roadside-parking?lat=${encodeURIComponent(center.lat)}&lon=${encodeURIComponent(center.lon)}&radius=${Math.min(radius,4000)}`);
+      roadside=d.results||[];
+    }catch(e){
+      console.warn("Straßenrand-Fallback nicht verfügbar",e);
+    }
+  }
+
+  const combined=[
+    ...designated.map(x=>({...x,roadside:false})),
+    ...roadside.map(x=>({...x,roadside:true}))
+  ];
+
+  return combined.map(p=>({
+      lat:+p.lat,lon:+p.lon,
+      name:p.name||p.display_name||(p.roadside?"Straßenrand":"Parkplatz"),
+      access:p.access||"",
+      parking:p.parking||"",
+      fee:p.fee||"",
+      capacity:+p.capacity||0,
+      hiking:p.hiking||"",
+      surface:p.surface||"",
+      lit:p.lit||"",
+      maxstay:p.maxstay||"",
+      source:p.source||(p.roadside?"OSM Straße":"Nominatim"),
+      osmType:p.osm_type||"",
+      osmId:p.osm_id||null,
+      roadside:!!p.roadside,
+      roadType:p.roadType||p.highway||"",
+      roadName:p.roadName||""
+    }))
+    .filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon)&&!["private","no","customers","permit"].includes(p.access))
+    .map(p=>{
+      const nearestRouteKm=Math.min(...pts.map(c=>haversine(p,c)));
+      let meta=0;
+      if(/wander|hiking|trail/i.test(p.name))meta-=0.35;
+      if(p.fee==="yes")meta+=0.25;
+      if(p.capacity>=10)meta-=0.10;
+      if(p.roadside)meta+=parkingMode==="roadside"?0.30:0.65;
+      return {...p,nearestRouteKm,parkingScore:nearestRouteKm+meta};
+    })
+    .sort((a,b)=>a.parkingScore-b.parkingScore)
+    .slice(0,16);
+}
+
+function rotateRoundSequence(seq,startIndex,direction=1){
+  const n=seq.length;
+  if(!n)return [];
+  const out=[];
+  for(let step=0;step<n;step++){
+    const idx=(startIndex+direction*step+n*10)%n;
+    out.push(seq[idx]);
+  }
+  return out;
+}
+
+function sequenceSame(a,b){
+  return a.length===b.length && a.every((x,i)=>x.id===b[i].id);
+}
+
+function approxSequenceKm(seq){
+  let km=0;
+  for(let i=1;i<seq.length;i++)km+=haversine(seq[i-1],seq[i]);
+  return km;
+}
+
+async function optimizeParkingAndEntry(baseSeq,parkings,opts,status,baseCacheReal=null,maxRealTests=6,allowGapViolations=false){
+  if(!baseSeq?.length || !parkings?.length)return null;
+  const approx=[];
+
+  for(const parking of parkings.slice(0,8)){
+    const nearest=[...baseSeq.keys()]
+      .sort((a,b)=>haversine(parking,baseSeq[a])-haversine(parking,baseSeq[b]))
+      .slice(0,3);
+    if(!nearest.includes(0))nearest.push(0);
+
+    for(const startIndex of nearest){
+      for(const direction of [1,-1]){
+        const seq=rotateRoundSequence(baseSeq,startIndex,direction);
+        const connectorKm=haversine(parking,seq[0])+haversine(seq[seq.length-1],parking);
+        const cacheKm=approxSequenceKm(seq);
+        const metaKm=Math.max(-0.25,Math.min(0.45,(parking.parkingScore||0)*0.08));
+        approx.push({parking,seq,startIndex,direction,approxKm:connectorKm+cacheKm+metaKm});
+      }
+    }
+  }
+
+  approx.sort((a,b)=>a.approxKm-b.approxKm);
+
+  // Keep the real-routing workload bounded while still testing multiple
+  // parking/entry/direction combinations.
+  const realTests=[];
+  const seen=new Set();
+  for(const c of approx){
+    const key=`${c.parking.osmId||`${c.parking.lat.toFixed(5)},${c.parking.lon.toFixed(5)}`}|${c.seq[0].id}|${c.direction}`;
+    if(seen.has(key))continue;
+    seen.add(key);
+    realTests.push(c);
+    if(realTests.length>=maxRealTests)break;
+  }
+
+  let best=null;
+  for(let i=0;i<realTests.length;i++){
+    const c=realTests[i];
+    if(status)status.textContent=`Optimiere Parkplatz und Einstieg ${i+1}/${realTests.length}: ${c.parking.name} → ${c.seq[0].id} …`;
+
+    let cacheReal;
+    try{
+      cacheReal=(baseCacheReal && sequenceSame(c.seq,baseSeq))
+        ? baseCacheReal
+        : await footRouteSequence(c.seq);
+    }catch(e){
+      continue;
+    }
+
+    // Normal mode rejects cache-to-cache gaps above the configured maximum.
+    // A user-confirmed fixed map selection may explicitly keep such gaps.
+    if(!allowGapViolations && (cacheReal.legDurations||[]).some(sec=>sec>opts.maxGap*60))continue;
+
+    let toFirst,fromLast;
+    try{
+      toFirst=await connectorRoute(c.parking,c.seq[0]);
+      fromLast=await connectorRoute(c.seq[c.seq.length-1],c.parking);
+    }catch(e){
+      continue;
+    }
+
+    const geometry={type:"LineString",coordinates:mergeGeometries(toFirst.geometry,cacheReal.geometry,fromLast.geometry)};
+    const walkingDistance=(toFirst.distance||0)+(cacheReal.distance||0)+(fromLast.distance||0);
+    const walkingDuration=(toFirst.duration||0)+(cacheReal.duration||0)+(fromLast.duration||0);
+    const overlap=overlapRatio(geometry.coordinates);
+
+    // Total walking distance is the primary criterion.
+    // Repeated path and parking metadata only act as small tie-breakers.
+    const scoreMeters=walkingDistance + overlap*450 + Math.max(-150,Math.min(250,(c.parking.parkingScore||0)*90));
+    const result={
+      parking:c.parking,
+      seq:c.seq,
+      cacheReal,
+      toFirst,
+      fromLast,
+      walkingDistance,
+      walkingDuration,
+      geometry,
+      overlap,
+      scoreMeters,
+      entryCacheId:c.seq[0]?.id||null,
+      direction:c.direction===1?"vorwärts":"rückwärts",
+      tested:realTests.length
+    };
+    if(!best || result.scoreMeters<best.scoreMeters)best=result;
+
+    if(i<realTests.length-1)await sleep(500);
+  }
+
+  return best;
+}
+
+async function carRoute(origin,dest){
+  const coords=`${origin.lon},${origin.lat};${dest.lon},${dest.lat}`;
+  const url=`${CAR_ROUTER}?coords=${encodeURIComponent(coords)}`;
+  const res=await fetch(url,{cache:"no-store"});
+  if(!res.ok){const detail=await res.text().catch(()=> "");throw new Error(`Anfahrtsrouting HTTP ${res.status}${detail?": "+detail.slice(0,180):""}`);}
+  const data=await res.json();
+  const r=data.routes?.[0];
+  if(!r) throw new Error("Keine Anfahrtsroute");
+  return {distance:r.distance||0,duration:r.duration||0};
+}
+
+
+function sampleGeometry(coords,maxPoints=100){
+  if(!coords?.length) return [];
+  if(coords.length<=maxPoints) return coords;
+  const out=[];
+  for(let i=0;i<maxPoints;i++){
+    const idx=Math.round(i*(coords.length-1)/(maxPoints-1));
+    out.push(coords[idx]);
+  }
+  return out;
+}
+
+async function fetchElevationForGeometry(coords){
+  const sampled=sampleGeometry(coords,100);
+  if(!sampled.length) return null;
+  const lats=sampled.map(c=>c[1]).join(",");
+  const lons=sampled.map(c=>c[0]).join(",");
+  const res=await fetch(`${ELEVATION}?lat=${encodeURIComponent(lats)}&lon=${encodeURIComponent(lons)}`,{cache:"no-store"});
+  if(!res.ok){const t=await res.text().catch(()=> "");throw new Error(`Höhenprofil HTTP ${res.status}${t?": "+t.slice(0,120):""}`)}
+  const data=await res.json();
+  const ele=data.elevation||[];
+  if(!ele.length) return null;
+
+  // Light smoothing to reduce DEM stair-step noise.
+  const smooth=ele.map((v,i)=>{
+    const vals=[];
+    for(let j=Math.max(0,i-1);j<=Math.min(ele.length-1,i+1);j++) vals.push(+ele[j]);
+    return vals.reduce((a,b)=>a+b,0)/vals.length;
+  });
+  let gain=0,loss=0;
+  for(let i=1;i<smooth.length;i++){
+    const d=smooth[i]-smooth[i-1];
+    if(Math.abs(d)<1.5) continue;
+    if(d>0) gain+=d; else loss+=Math.abs(d);
+  }
+  return {
+    elevations:smooth,
+    gain,loss,
+    min:Math.min(...smooth),
+    max:Math.max(...smooth),
+    samples:sampled
+  };
+}
+
+function elevationSvg(profile){
+  if(!profile?.elevations?.length) return "";
+  const vals=profile.elevations,w=300,h=64,pad=4;
+  const min=Math.min(...vals),max=Math.max(...vals),range=Math.max(1,max-min);
+  const pts=vals.map((v,i)=>{
+    const x=pad+i*(w-2*pad)/Math.max(1,vals.length-1);
+    const y=h-pad-(v-min)*(h-2*pad)/range;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  return `<div class="elevation-profile"><svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline points="${pts}" fill="none" stroke="currentColor" stroke-width="2"/></svg><div class="elevation-caption"><span>${Math.round(min)} m</span><span>↑ ${Math.round(profile.gain)} m · ↓ ${Math.round(profile.loss)} m</span><span>${Math.round(max)} m</span></div></div>`;
+}
+
+async function tryPreserveAllCachesByChangingBreak(seq,result,opts,status){
+  const bad=(result.legDurations||[])
+    .map((sec,i)=>({sec,i}))
+    .filter(x=>x.sec>opts.maxGap*60)
+    .sort((a,b)=>b.sec-a.sec);
+
+  if(!bad.length)return null;
+
+  // A round does not need a cache-to-cache connection across the parking break.
+  // Therefore a bad real walking leg can often be moved to "last cache -> parking -> first cache"
+  // simply by rotating the sequence instead of deleting a cache.
+  const trials=[];
+  const seen=new Set();
+
+  for(const b of bad.slice(0,3)){
+    const starts=[b.i+1,b.i];
+    for(const start of starts){
+      for(const direction of [1,-1]){
+        const cand=rotateRoundSequence(seq,(start+seq.length)%seq.length,direction);
+        const key=cand.map(c=>c.id).join(">");
+        if(seen.has(key) || sequenceSame(cand,seq))continue;
+        seen.add(key);
+        trials.push(cand);
+      }
+    }
+  }
+
+  let best=null;
+  const limit=Math.min(6,trials.length);
+  for(let i=0;i<limit;i++){
+    const cand=trials[i];
+    if(status)status.textContent=`Cachefolge erhalten: prüfe alternativen Einstieg ${i+1}/${limit} (${cand[0].id}) …`;
+    try{
+      const real=await footRouteSequence(cand);
+      const violations=(real.legDurations||[]).filter(sec=>sec>opts.maxGap*60).length;
+      if(violations===0){
+        if(!best || real.distance<best.result.distance){
+          best={seq:cand,result:real,reordered:true,reason:"parking-break"};
+        }
+      }
+    }catch(e){}
+    if(i<limit-1)await sleep(350);
+  }
+  return best;
+}
+
+function violationDetailsForSequence(seq,legDurations,opts){
+  return (legDurations||[]).map((sec,i)=>({
+    from:seq[i]?.id||"?",
+    to:seq[i+1]?.id||"?",
+    sec,
+    min:sec/60,
+    over:sec>opts.maxGap*60
+  })).filter(x=>x.over);
+}
+
+
+function lockedSelectionIds(route){
+  return Array.isArray(route?.manualLockedCacheIds) ? route.manualLockedCacheIds.filter(Boolean) : [];
+}
+
+function sequenceForLockedSelection(route,fallbackSeq){
+  const ids=lockedSelectionIds(route);
+  if(!ids.length)return [...fallbackSeq];
+  const wanted=new Set(ids);
+  const pool=new Map();
+  [...fallbackSeq,...state.caches].forEach(c=>{if(c?.id && !pool.has(c.id))pool.set(c.id,c);});
+  const ordered=[];
+  fallbackSeq.forEach(c=>{if(wanted.has(c.id) && !ordered.some(x=>x.id===c.id))ordered.push(c);});
+  ids.forEach(id=>{if(!ordered.some(c=>c.id===id) && pool.has(id))ordered.push(pool.get(id));});
+  return ordered;
+}
+
+function missingLockedCaches(route,seq){
+  const present=new Set((seq||[]).map(c=>c.id));
+  return lockedSelectionIds(route).filter(id=>!present.has(id));
+}
+
+function lockedSelectionHtml(route){
+  const ids=lockedSelectionIds(route);
+  if(!ids.length)return "";
+  const finalSeq=route.real?.finalSequence||cacheSequence(route);
+  const missing=missingLockedCaches(route,finalSeq);
+  if(missing.length){
+    return `<div class="locked-selection-note warn">⚠ Fixierte Kartenauswahl unvollständig: ${missing.map(escapeHtml).join(", ")}</div>`;
+  }
+  return `<div class="locked-selection-note">🔒 Kartenauswahl fixiert: ${ids.length}/${ids.length} ausgewählte Caches enthalten.</div>`;
+}
+
+async function routeAndRepairSequence(originalSeq,opts,status,config={}){
+  let seq=[...originalSeq];
+  const removed=[];
+  let result=null;
+  let reordered=false;
+  const allowViolations=!!config.allowViolations;
+
+  for(let attempt=0;attempt<6;attempt++){
+    result=await footRouteSequence(seq);
+    const bad=result.legDurations
+      .map((sec,i)=>({sec,i}))
+      .filter(x=>x.sec>opts.maxGap*60)
+      .sort((a,b)=>b.sec-a.sec);
+
+    if(!bad.length){
+      return {seq,result,removed,violations:0,reordered,violationDetails:[]};
+    }
+
+    if(allowViolations){
+      return {
+        seq,result,removed,
+        violations:bad.length,
+        reordered,
+        manualOverride:true,
+        violationDetails:violationDetailsForSequence(seq,result.legDurations,opts)
+      };
+    }
+
+    const preserved=await tryPreserveAllCachesByChangingBreak(seq,result,opts,status);
+    if(preserved){
+      return {
+        seq:preserved.seq,
+        result:preserved.result,
+        removed,
+        violations:0,
+        reordered:true,
+        preservedAllCaches:true,
+        violationDetails:[]
+      };
+    }
+
+    if(seq.length<=2){
+      return {
+        seq,result,removed,
+        violations:bad.length,
+        reordered,
+        violationDetails:violationDetailsForSequence(seq,result.legDurations,opts)
+      };
+    }
+
+    const worst=bad[0].i;
+    const candidates=[];
+    for(const removeIndex of [worst,worst+1]){
+      if(removeIndex<0 || removeIndex>=seq.length)continue;
+      const trial=seq.filter((_,i)=>i!==removeIndex);
+      if(trial.length<1)continue;
+      let localCost=0;
+      if(removeIndex>0 && removeIndex<trial.length){
+        localCost=haversine(trial[removeIndex-1],trial[removeIndex]);
+      }else{
+        localCost=999;
+      }
+      candidates.push({removeIndex,localCost});
+    }
+    candidates.sort((a,b)=>a.localCost-b.localCost);
+    const chosen=candidates[0];
+    if(!chosen){
+      return {
+        seq,result,removed,
+        violations:bad.length,
+        reordered,
+        violationDetails:violationDetailsForSequence(seq,result.legDurations,opts)
+      };
+    }
+
+    const [gone]=seq.splice(chosen.removeIndex,1);
+    removed.push(gone);
+    if(status){
+      status.textContent=`Echter Fußweg > ${opts.maxGap} min. Entferne ${gone.id} und prüfe erneut …`;
+    }
+    await sleep(ROUTER_DELAY_MS);
+  }
+
+  const details=violationDetailsForSequence(seq,result.legDurations,opts);
+  return {seq,result,removed,violations:details.length,reordered,violationDetails:details};
+}
+
+function segmentKey(a,b,precision=4){
+  const p1=`${a[0].toFixed(precision)},${a[1].toFixed(precision)}`;
+  const p2=`${b[0].toFixed(precision)},${b[1].toFixed(precision)}`;
+  return p1<p2?`${p1}|${p2}`:`${p2}|${p1}`;
+}
+
+function overlapRatio(coords){
+  if(!coords?.length || coords.length<2) return 0;
+  const seen=new Set();
+  let total=0,repeated=0;
+  for(let i=1;i<coords.length;i++){
+    const a=coords[i-1],b=coords[i];
+    const km=haversine({lat:a[1],lon:a[0]},{lat:b[1],lon:b[0]});
+    total+=km;
+    const key=segmentKey(a,b,4);
+    if(seen.has(key)) repeated+=km;
+    seen.add(key);
+  }
+  return total>0?repeated/total:0;
+}
+
+function mergeGeometries(...geoms){
+  const out=[];
+  geoms.forEach(g=>{
+    const arr=g?.coordinates||[];
+    if(!arr.length) return;
+    if(out.length) out.push(...arr.slice(1)); else out.push(...arr);
+  });
+  return out;
+}
+
+async function alternativeReturnRoute(last,parking,forwardGeometry){
+  const midLat=(last.lat+parking.lat)/2, midLon=(last.lon+parking.lon)/2;
+  const offsets=[
+    [0.0035,0],[ -0.0035,0],[0,0.005],[0,-0.005],
+    [0.003,0.004],[-0.003,-0.004]
+  ];
+  const candidates=[];
+  for(const [dLat,dLon] of offsets){
+    try{
+      const via={lat:midLat+dLat,lon:midLon+dLon};
+      const r=await footRouteRequest([last,via,parking],false);
+      const merged=mergeGeometries({coordinates:forwardGeometry},r.geometry);
+      candidates.push({route:r,overlap:overlapRatio(merged)});
+      await sleep(ROUTER_DELAY_MS);
+    }catch(e){}
+  }
+  if(!candidates.length) return null;
+  candidates.sort((a,b)=>a.overlap-b.overlap || a.route.distance-b.route.distance);
+  return candidates[0];
+}
+
+
+async function estimateForestShare(coords){
+  const sampled=sampleGeometry(coords,18);
+  if(!sampled.length)return null;
+  const res=await fetch(LANDCOVER,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({points:sampled.map(c=>({lat:c[1],lon:c[0]}))})});
+  if(!res.ok)return null;
+  const d=await res.json();return d.forestShare??null;
+}
+function gpxTextForRoute(r){
+  const esc=s=>String(s).replace(/[<>&'"]/g,ch=>({"<":"&lt;",">":"&gt;","&":"&amp;","'":"&apos;",'"':"&quot;"}[ch]));
+  const seq=r.real?.finalSequence||cacheSequence(r);
+  const pts=r.real?.geometry?.coordinates?.length?r.real.geometry.coordinates.map(c=>({lon:c[0],lat:c[1]})):r.points;
+  const trk=pts.map(p=>`<trkpt lat="${p.lat}" lon="${p.lon}"></trkpt>`).join("");
+  const wp=seq.map(p=>`<wpt lat="${p.lat}" lon="${p.lon}"><name>${esc(p.id)}</name><desc>${esc(p.name)}</desc></wpt>`).join("");
+  const park=(r.real && validRoutingPoint(r.real.parking))
+    ? `<wpt lat="${r.real.parking.lat}" lon="${r.real.parking.lon}"><name>Parking</name><desc>${esc(r.real.parking?.name||"Startpunkt")}</desc></wpt>`
+    : "";
+  return `<?xml version="1.0" encoding="UTF-8"?><gpx version="1.1" creator="CacheRunde 0.4.0" xmlns="http://www.topografix.com/GPX/1/1">${park}${wp}<trk><name>${esc(r.displayName||r.name)}</name><trkseg>${trk}</trkseg></trk></gpx>`;
+}
+async function shareRouteGPX(r){
+  const text=gpxTextForRoute(r),filename=`${(r.displayName||r.name).replace(/\W+/g,"-").toLowerCase()}.gpx`;
+  const file=new File([text],filename,{type:"application/gpx+xml"});
+  try{
+    if(navigator.canShare?.({files:[file]})){await navigator.share({title:r.displayName||r.name,text:"CacheRunde GPX",files:[file]});return;}
+  }catch(e){if(e.name==="AbortError")return;}
+  const u=URL.createObjectURL(new Blob([text],{type:"application/gpx+xml"}));const a=document.createElement("a");a.href=u;a.download=filename;a.click();URL.revokeObjectURL(u);
+}
+
+
+function chooseManualParking(route,lockSequence=false){
+  if(!route){
+    showToast("Keine Route gewählt. Berechne oder öffne zuerst eine Route.","warn",4500);
+    return;
+  }
+  state.parkingPickRoute=route;
+  state.parkingPickLockSequence=!!lockSequence;
+  switchTab("karte");
+  $("#map")?.classList.add("map-pick-active");
+  $("#mapInfo").innerHTML=`<div style="width:100%">
+    <strong>🅿 Parkplatz ${route.real?.parking?"verschieben":"manuell setzen"}</strong>
+    <span>Klicke auf die gewünschte Stelle der Karte.</span>
+    <div class="parking-move-note">
+      <strong>${lockSequence?"Cachefolge bleibt fix":"Route wird anschließend neu geprüft"}</strong>
+      ${lockSequence
+        ?"Bei der freien/manuell bearbeiteten Planung bleibt die aktuelle Cache-Reihenfolge erhalten. Neu berechnet werden Parkplatz→erster Cache, letzter Cache→Parkplatz, Gesamtdistanz und Gesamtzeit."
+        :"Der gewählte Punkt wird als manueller Parkplatz verwendet und die Echtroute anschließend neu berechnet."}
+    </div>
+  </div>`;
+}
+
+async function applyManualParking(route,lat,lon,lockSequence=false){
+  if(!route)return;
+  route.manualParking={
+    lat:+lat,lon:+lon,
+    name:"Manuell gewählter Parkplatz",
+    parkingScore:0,
+    fee:"",
+    capacity:0,
+    source:"Manuell",
+    roadside:false
+  };
+  route.manualParkingLockSequence=!!lockSequence;
+
+  if(lockSequence){
+    // Freeze the current displayed cache order exactly as it is.
+    const currentSeq=route.real?.finalSequence || cacheSequence(route);
+    route.points=[...currentSeq];
+    if(route.manualSelectionLocked){
+      route.manualLockedCacheIds=currentSeq.map(c=>c.id);
+    }
+  }
+
+  const fakeButton={textContent:"Echtroute neu prüfen",disabled:false};
+  const result=await refineRoute(route,fakeButton);
+  if(result){
+    showToast(
+      lockSequence
+        ? "Parkplatz verschoben. Cachefolge blieb unverändert; Hin-/Rückweg wurden neu berechnet."
+        : "Manueller Parkplatz übernommen und Echtroute neu berechnet.",
+      "success",5500
+    );
+  }
+}
+
+async function refineRoute(route,button){
+  const status=$("#routingStatus");
+  const lockedIds=lockedSelectionIds(route);
+  const parkingOrderLocked=!!route.manualParkingLockSequence;
+  const pre=(lockedIds.length || parkingOrderLocked) ? null : (route.precheck?.full?route.precheck:null);
+  const baseSeq=parkingOrderLocked && route.real?.finalSequence?.length
+    ? [...route.real.finalSequence]
+    : (pre?.finalSequence?.length ? [...pre.finalSequence] : cacheSequence(route));
+  const seq=parkingOrderLocked
+    ? [...baseSeq]
+    : (lockedIds.length ? sequenceForLockedSelection(route,baseSeq) : baseSeq);
+  const preliminary=pre ? {
+    cacheCount:pre.cacheCount,
+    km:(pre.walkingDistance||0)/1000,
+    totalMin:(pre.totalDuration||0)/60,
+    source:"realistic-precheck"
+  } : {
+    cacheCount:route.stats?.cacheCount||seq.length,
+    km:route.stats?.km||0,
+    totalMin:route.stats?.totalMin||0,
+    source:"estimate"
+  };
+  if(seq.length<1){alert("Keine Cachepunkte für Echtrouting.");return;}
+
+  const oldText=button.textContent;
+  setProgress(5,"Bereite Echtrouting vor …","Echtroute");
+  button.disabled=true;
+  button.textContent="Prüfe Fußwege …";
+  if(status) status.textContent=`Prüfe ${seq.length} Caches über echte Fußwege …`;
+
+  let routingStage="Start";
+  try{
+    const opts=getOpts(false);
+    routingStage="Cachefolge prüfen";
+    setProgress(15,"Prüfe Cachefolge über echte Fußwege …","Echtroute");
+    const repaired=await routeAndRepairSequence(seq,opts,status,{
+      // A fixed map selection must never be silently repaired by deleting caches.
+      // If it contains long gaps, keep them and surface them as rule deviations.
+      allowViolations:!!route.manualAllowGapViolations || lockedIds.length>0 || parkingOrderLocked
+    });
+    let finalSeq=repaired?.seq||[];
+    let cacheReal=repaired?.result||null;
+    if(!finalSeq.length)throw new Error("Cachefolge ist nach der Prüfung leer.");
+    if(!cacheReal)throw new Error("Cache-Fußrouting lieferte kein Ergebnis.");
+    let maxCacheLegSec=Math.max(0,...(cacheReal.legDurations||[]));
+    const violations=repaired.violations;
+
+    const repairText=repaired.removed.length
+      ? ` · ${repaired.removed.length} Cache(s) entfernt`
+      : repaired.reordered
+        ? " · Einstieg/Reihenfolge angepasst, alle Caches behalten"
+        : "";
+    setProgress(35,`Cachefolge geprüft${repairText}. Suche Parkplatz …`,"Echtroute");
+    if(status)status.textContent=`Echte Cachekette: ${(cacheReal.distance/1000).toFixed(1)} km${repairText}. Suche Parkplatz …`;
+    await sleep(ROUTER_DELAY_MS);
+
+    routingStage="Parkplatz suchen";
+    let parkings=[];
+    let parking=null;
+    let parkingAutomatic=true;
+
+    if(route.manualParking){
+      parking=route.manualParking;
+      parkings=[parking];
+      parkingAutomatic=false;
+      setProgress(45,"Manuell gewählten Parkplatz prüfen …","Echtroute");
+      if(status) status.textContent="Manuell gewählten Parkplatz prüfen …";
+    }else{
+      try{
+        const parkingPromise=findParkingCandidates(finalSeq[0],finalSeq[finalSeq.length-1],finalSeq,opts.parkingMode||"fallback");
+        const timeoutPromise=new Promise((_,reject)=>setTimeout(()=>reject(new Error("timeout")),10000));
+        parkings=await Promise.race([parkingPromise,timeoutPromise]);
+        if(pre?.parking && !pre.parking.previewFallback){
+          const idx=parkings.findIndex(p=>
+            (pre.parking.osmId && p.osmId===pre.parking.osmId) ||
+            (Math.abs(p.lat-pre.parking.lat)<0.00002 && Math.abs(p.lon-pre.parking.lon)<0.00002)
+          );
+          if(idx>0){
+            const [preferred]=parkings.splice(idx,1);
+            parkings.unshift(preferred);
+          }
+        }
+        if(parkings.length) parking=parkings[0];
+      }catch(e){}
+    }
+
+    if(!parking){
+      parking={...finalSeq[0],name:"Kein Parkplatz automatisch gefunden",parkingScore:null,fee:"",capacity:0};
+      parkingAutomatic=false;
+      setProgress(50,"Kein Parkplatz automatisch gefunden. Nutze vorläufig ersten Cache als Start …","Echtroute");
+      if(status) status.textContent="Kein Parkplatz automatisch gefunden. Route wird trotzdem fertiggestellt.";
+    }else if(status){
+      setProgress(50,`${parkings.length} Parkplatz-Kandidat(en) gefunden. Prüfe Fußwege …`,"Echtroute");
+      status.textContent=`${parkings.length} Parkplatz-Kandidat(en) gefunden. Prüfe Fußwege zum Parkplatz …`;
+    }
+
+    await sleep(ROUTER_DELAY_MS);
+
+    let parkingPlan=null;
+    if(parkings.length && !parkingOrderLocked){
+      setProgress(54,"Optimiere Parkplatz, Einstieg und Laufrichtung nach Gesamtweg …","Echtroute");
+      parkingPlan=await optimizeParkingAndEntry(
+        finalSeq,parkings,opts,status,cacheReal,6,
+        !!route.manualAllowGapViolations || lockedIds.length>0
+      );
+    }else if(parkingOrderLocked && status){
+      setProgress(54,"Manuellen Parkplatz anbinden · Cachefolge bleibt unverändert …","Echtroute");
+      status.textContent="Manueller Parkplatz: Cache-Reihenfolge bleibt fix. Berechne nur Hin- und Rückweg.";
+    }
+
+    let toFirst,fromLast;
+    let entryCacheId=finalSeq[0]?.id||null;
+    let walkingDirection="vorwärts";
+    let parkingVariantsTested=parkingPlan?.tested||0;
+
+    routingStage="Parkplatz-Verbindungen berechnen";
+    if(parkingPlan?.parking && parkingPlan?.cacheReal && parkingPlan?.toFirst && parkingPlan?.fromLast){
+      parking=parkingPlan.parking;
+      finalSeq=parkingPlan.seq||finalSeq;
+      cacheReal=parkingPlan.cacheReal;
+      maxCacheLegSec=Math.max(0,...(cacheReal.legDurations||[]));
+      toFirst=parkingPlan.toFirst;
+      fromLast=parkingPlan.fromLast;
+      entryCacheId=parkingPlan.entryCacheId;
+      walkingDirection=parkingPlan.direction;
+    }else{
+      if(!parking)parking={...finalSeq[0],name:"Start am ersten Cache",parkingScore:null,fee:"",capacity:0};
+      toFirst=await connectorRoute(parking,finalSeq[0]);
+      await sleep(ROUTER_DELAY_MS);
+      fromLast=await connectorRoute(finalSeq[finalSeq.length-1],parking);
+    }
+    if(!toFirst || !fromLast || !cacheReal){
+      throw new Error("Eine der Fußweg-Komponenten ist leer geblieben.");
+    }
+
+    routingStage="Fixierte Cacheauswahl prüfen";
+    const missingLocked=missingLockedCaches(route,finalSeq);
+    if(missingLocked.length){
+      throw new Error(`Fixierte Kartenauswahl verletzt: Folgende ausgewählte Caches würden fehlen: ${missingLocked.join(", ")}. Die Route wurde deshalb nicht stillschweigend verändert.`);
+    }
+
+    routingStage="Wandergeometrie zusammensetzen";
+    const forwardGeometry=mergeGeometries(toFirst?.geometry,cacheReal?.geometry);
+    const directGeometry=mergeGeometries({coordinates:forwardGeometry},fromLast.geometry);
+    const directOverlap=overlapRatio(directGeometry);
+    let chosenReturnMode="direkt";
+
+    if(directOverlap>0.12){
+      if(status) status.textContent=`Rückweg überschneidet sich zu ${Math.round(directOverlap*100)} %. Suche Alternative …`;
+      routingStage="Alternativen Rückweg prüfen";
+      const alt=await alternativeReturnRoute(finalSeq[finalSeq.length-1],parking,forwardGeometry);
+      if(alt && alt.overlap <= directOverlap-0.03 && alt.route.distance <= fromLast.distance*1.45){
+        fromLast=alt.route;
+        chosenReturnMode="alternativ";
+      }
+    }
+
+    routingStage="Anfahrt berechnen";
+    setProgress(65,"Hin- und Rückweg zum Parkplatz werden berechnet …","Echtroute");
+    let drive=null;
+    try{drive=await carRoute(opts.start,parking);}catch(e){}
+
+    const walkingDistance=(toFirst?.distance||0)+(cacheReal?.distance||0)+(fromLast?.distance||0);
+    const walkingDuration=(toFirst?.duration||0)+(cacheReal?.duration||0)+(fromLast?.duration||0);
+    const totalSec=walkingDuration + finalSeq.length*opts.stopTime*60;
+
+    const realGeometry={
+      type:"LineString",
+      coordinates:mergeGeometries(toFirst.geometry,cacheReal.geometry,fromLast.geometry)
+    };
+    const routeOverlap=overlapRatio(realGeometry.coordinates);
+
+    routingStage="Höhenprofil berechnen";
+    setProgress(78,"Berechne Höhenprofil …","Echtroute");
+    if(status) status.textContent="Echtroute steht. Berechne Höhenprofil …";
+    let elevation=null;
+    let elevationError=null;
+    try{
+      elevation=await fetchElevationForGeometry(realGeometry.coordinates);
+      if(status && elevation) status.textContent="Höhenprofil geladen. Finalisiere Tour …";
+    }catch(e){
+      elevationError=e.message||String(e);
+      console.warn(e);
+      if(status) status.textContent=`Echtroute steht, Höhenprofil konnte nicht geladen werden: ${elevationError}`;
+    }
+
+    // Waldanalyse darf das Echtrouting nicht blockieren.
+    // Sie wird nach Abschluss der Route im Hintergrund nachgeladen.
+    let forestShare=null;
+    routingStage="Ergebnis finalisieren";
+    route.real={
+      parking,
+      parkingCandidates:parkings.length,
+      parkingAutomatic,
+      parkingScore:parking?.parkingScore??null,
+      parkingOptimizationKm:walkingDistance/1000,
+      entryCacheId,
+      walkingDirection,
+      parkingVariantsTested,
+      manualParkingSequenceLocked:parkingOrderLocked,
+      cacheFreeReturn:true,
+      removedCaches:repaired.removed,
+      repairReordered:!!repaired.reordered,
+      preservedAllCaches:!!repaired.preservedAllCaches,
+      preliminary,
+      finalSequence:finalSeq,
+      elevation,
+      elevationError,
+      forestShare,
+      cacheDistance:cacheReal?.distance||0,
+      walkingDistance,
+      walkingDuration,
+      totalDuration:totalSec,
+      maxCacheLegSec,
+      violations,
+      violationDetails:repaired.violationDetails||[],
+      manualGapOverride:!!repaired.manualOverride,
+      lockedSelection:lockedIds.length>0,
+      lockedSelectionIds:[...lockedIds],
+      drive,
+      geometry:realGeometry,
+      overlapRatio:routeOverlap,
+      returnMode:chosenReturnMode,
+      checkedAt:new Date().toISOString()
+    };
+
+    route.stats.km=walkingDistance/1000;
+    route.stats.walkMin=walkingDuration/60;
+    route.stats.totalMin=totalSec/60;
+    route.stats.cacheCount=finalSeq.length;
+    if(elevation){
+      route.stats.gain=elevation.gain;
+      route.stats.loss=elevation.loss;
+    }
+
+    if(status){
+      status.textContent=violations
+        ? `${lockedIds.length?`Fixierte Auswahl mit ${lockedIds.length} Caches beibehalten. `:""}Echtroute mit ${violations} Regelabweichung(en): Cache→Cache länger als ${opts.maxGap} Minuten.`
+        : `${lockedIds.length?`Fixierte Auswahl mit ${lockedIds.length} Caches vollständig enthalten. `:""}Echtroute geprüft: alle Cache→Cache-Abstände ≤ ${opts.maxGap} Minuten.`;
+    }
+
+    renderRoutes("#advancedResults",state.routes,$("#sortBy").value);
+    showRouteOnMap(route);
+    finishProgress("Echtroute fertig berechnet.");
+
+    // Non-blocking forest analysis
+    estimateForestShare(realGeometry.coordinates).then(v=>{
+      if(v==null)return;
+      route.real.forestShare=v;
+      renderRoutes("#advancedResults",state.routes,$("#sortBy").value);
+      if(state.selectedRoute===route) showRouteOnMap(route);
+    }).catch(()=>{});
+    return route;
+  }catch(e){
+    const raw=e?.message||String(e)||"Unbekannter Fehler";
+    const msg=`${routingStage}: ${raw}`;
+    failProgress(msg);
+    console.error("Echtrouting fehlgeschlagen",{stage:routingStage,error:e});
+    if(status)status.textContent=`Echtrouting fehlgeschlagen in „${routingStage}“: ${raw}`;
+    alert(`Echtrouting fehlgeschlagen in „${routingStage}“:\n${raw}`);
+    return null;
+  }finally{
+    button.disabled=false;
+    button.textContent=oldText;
+  }
+}
+
+
+const placeNameCache=new Map();
+function routeCenter(r){
+  const pts=(r.real?.finalSequence || cacheSequence(r));
+  if(!pts.length)return null;
+  return {lat:pts.reduce((a,p)=>a+p.lat,0)/pts.length,lon:pts.reduce((a,p)=>a+p.lon,0)/pts.length};
+}
+function routeDescriptor(r,routes){
+  const same=routes.filter(x=>x.placeName===r.placeName);
+  if(same.length<=1)return "Cache-Runde";
+  const kms=same.map(x=>x.stats.km).sort((a,b)=>a-b), mid=kms[Math.floor(kms.length/2)];
+  const gains=same.map(x=>x.stats.gain||0).sort((a,b)=>a-b), high=gains[Math.floor(gains.length*.75)];
+  if((r.stats.gain||0)>=high && high>150)return "Höhenrunde";
+  if(r.stats.km<=mid*.9)return "Kompakte Runde";
+  if(r.stats.km>=mid*1.15)return "Große Runde";
+  return "Cache-Runde";
+}
+async function reversePlaceName(lat,lon){
+  const key=`${lat.toFixed(3)},${lon.toFixed(3)}`;
+  if(placeNameCache.has(key))return placeNameCache.get(key);
+  try{
+    const res=await fetch(`/api/reverse?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`,{cache:"no-store"});
+    if(!res.ok)throw new Error();
+    const d=await res.json(),a=d.address||{};
+    const name=a.village||a.town||a.city||a.municipality||a.suburb||a.hamlet||a.county||d.name||"Cachegebiet";
+    placeNameCache.set(key,name);return name;
+  }catch(e){return "Cachegebiet";}
+}
+async function enrichRouteNames(routes){
+  await Promise.all(routes.map(async r=>{const c=routeCenter(r);r.placeName=c?await reversePlaceName(c.lat,c.lon):"Cachegebiet";}));
+  routes.forEach(r=>r.displayName=`${r.placeName} · ${routeDescriptor(r,routes)}`);
+}
+
+function renderRoutes(container, routes, sortMode="distance"){
+  const host=$(container); host.innerHTML="";
+  const sorted=sortRoutes(routes,sortMode);
+  if(!sorted.length){
+    host.innerHTML=`<div class="card"><strong>Keine passende Runde gefunden.</strong><p class="muted">Versuche einen größeren Radius, mehr Wanderzeit oder einen größeren Cache-Abstand. Du kannst in „Touren“ testweise auch „Gefundene ausschließen“ deaktivieren.</p>${diagnosticsHtml()}</div>`;
+    return;
+  }
+  sorted.forEach((r,i)=>{
+    const node=$("#routeTemplate").content.cloneNode(true);
+    node.querySelector(".rank").textContent=`Vorschlag ${i+1}`;
+    node.querySelector(".route-name").textContent=r.displayName||r.name;
+    const quality=routeQualityScore(r);
+    const cacheRate=routeCacheRate(r);
+    node.querySelector(".score").textContent=`Qualität ${quality.toFixed(1)}`;
+    const m=node.querySelector(".route-metrics");
+    const ds=previewStats(r);
+    m.innerHTML=`
+      <div class="metric"><strong>${ds.km.toFixed(1)} km</strong><span>${r.real?"Echte Wanderstrecke":r.precheck?.full?"Vorprüfung inkl. Parkplatz":"Schätzung"}</span></div>
+      <div class="metric"><strong>${fmtMin(ds.totalMin)}</strong><span>inkl. Cachezeit</span></div>
+      <div class="metric"><strong>${ds.cacheCount}</strong><span>ungefundene Caches</span></div>
+      <div class="metric"><strong>↑ ${Math.round(ds.gain)} m · ↓ ${Math.round(ds.loss)} m</strong><span>Höhenmeter</span></div>`;
+    m.insertAdjacentHTML("afterend",`<div class="quality-detail"><span><strong>${cacheRate.toFixed(1)}</strong> Caches/h</span><span><strong>${ds.cacheCount}</strong> Caches</span><span>${ds.km.toFixed(1)} km Rundengröße</span><span>${r.startDistance.toFixed(1)} km vom Ausgangspunkt</span></div>`);
+    if(r.real){
+      const driveTxt=r.real.drive?` · 🚗 ${fmtMin(r.real.drive.duration/60)} Anfahrt`:"";
+      const violationText=(r.real.violationDetails||[]).slice(0,3)
+        .map(v=>`${v.from}→${v.to}: ${fmtMin(v.min)}`).join(" · ");
+      const ruleTxt=r.real.violations===0
+        ? `<span class="pill real-badge">${getOpts(false).maxGap}-Min.-Regel ✓</span>`
+        : `<span class="pill warn-badge">${r.real.violations} Überschreitung(en)</span>`;
+      node.querySelector(".cache-line").innerHTML=
+        `${ruleTxt}<div class="real-details"><strong>🅿 ${r.real.parking?.name||"Startpunkt"}</strong><br>`+
+        `Echte Wanderstrecke: ${(r.real.walkingDistance/1000).toFixed(1)} km · `+
+        `max. Cache→Cache: ${fmtMin(r.real.maxCacheLegSec/60)}${driveTxt}<br>`+
+        `${r.real.parkingAutomatic
+          ? `<span class="parking-score">Gesamtweg-optimiert${r.real.entryCacheId?` · Einstieg ${r.real.entryCacheId}`:""}${r.real.walkingDirection?` · ${r.real.walkingDirection}`:""}${r.real.parkingVariantsTested?` · ${r.real.parkingVariantsTested} Varianten geprüft`:""}</span>`
+          : `<span class="pill warn-badge">${r.manualParking?"Manueller Parkplatz":"Kein Parkplatz automatisch gefunden"}</span>`}`+
+        `${r.real.parking?.roadside?`<br><span class="roadside-badge">🚗 Straßenrand-Fallback</span>`:""}`+
+        `${r.real.parking?.source?` · Quelle: ${r.real.parking.source}`:""}${r.real.parking?.fee==="yes"?" · gebührenpflichtig":""}${r.real.parking?.capacity?` · ca. ${r.real.parking.capacity} Plätze`:""}<br>`+
+        `${r.real.parking?.roadside?`<div class="roadside-note"><strong>Straßenrand-Parken:</strong> möglicher Startpunkt, keine Parkfreigabe. Beschilderung, Halte-/Parkverbote, Zufahrten und ausreichende Restfahrbahnbreite vor Ort prüfen.</div>`:""}`+
+        `Doppelweg-Anteil: ${Math.round((r.real.overlapRatio||0)*100)} % · Rückweg: ${r.real.returnMode==="alternativ"?"Alternative gewählt":"direkt"}<br>`+
+        `<div class="open-chain-note"><strong>Cachefreier Rückweg erlaubt</strong>Nach dem letzten Cache darf die Route direkt zum Parkplatz zurückführen. Es müssen auf diesem Abschnitt keine weiteren Caches liegen.</div>`+
+        `${r.real.forestShare!=null?`<span class="pill forest-badge">🌳 Waldnähe ca. ${Math.round(r.real.forestShare*100)} %</span><br>`:""}`+
+        `Gesamtzeit inkl. ${r.stats.cacheCount} × ${getOpts(false).stopTime} min Cachezeit: ${fmtMin(r.real.totalDuration/60)}`+
+        `${r.real.manualGapOverride?`<div class="manual-override">Manuell übersteuert: ${violationText||`mindestens eine Cache→Cache-Verbindung über ${getOpts(false).maxGap} Minuten`}.</div>`:""}`+
+        `${r.real.preservedAllCaches?`<div class="repair-note">Cachefolge erhalten: problematische Verbindung wurde an den Parkplatz-Schnitt gelegt; alle Caches bleiben in der Runde.</div>`:""}`+
+        `${r.real.removedCaches?.length?`<div class="repair-note">Auto-Reparatur erst nach Alternativprüfung: ${r.real.removedCaches.length} Cache(s) entfernt (${r.real.removedCaches.map(c=>c.id).join(", ")}). Vorprüfung: ${r.real.preliminary?.cacheCount??"—"} Caches / ca. ${r.real.preliminary?.km?.toFixed?.(1)??"—"} km → Echtroute: ${r.stats.cacheCount} Caches / ${r.stats.km.toFixed(1)} km.</div>`:""}`+
+        `${routeHealthHtml(r)}`+
+        `${lockedSelectionHtml(r)}`+
+        `${r.real.elevation?elevationSvg(r.real.elevation):`<div class="repair-note">Höhenprofil nicht verfügbar${r.real.elevationError?": "+r.real.elevationError:""}</div>`}</div>`;
+      node.querySelector(".refine-route").textContent="Echtroute neu prüfen";
+    }else{
+      const ds=previewStats(r);
+      node.querySelector(".cache-line").innerHTML=`<strong>${r.placeName||"Cachegebiet"}</strong> · ca. ${r.startDistance.toFixed(1)} km vom Ausgangspunkt<br>${r.precheck?.full
+        ? `<span class="muted">Die Hauptwerte oben stammen bereits aus echten Fußwegen einschließlich provisorischem Parkplatz und Rückweg.</span>`
+        : `<span class="muted">Noch Schnellschätzung; Parkplatz/Rückweg noch nicht vollständig geprüft.</span>`}${minCacheCheckHtml(r)}${precheckHtml(r,getOpts(false))}${routeHealthHtml(r)}`;
+    }
+    node.querySelector(".refine-route").onclick=(e)=>refineRoute(r,e.currentTarget);
+    node.querySelector(".view-route").onclick=()=>showRouteOnMap(r);
+    node.querySelector(".download-gpx").onclick=()=>downloadRouteGPX(r);
+    node.querySelector(".share-gpx").onclick=()=>shareRouteGPX(r);
+    node.querySelector(".manual-parking").onclick=()=>chooseManualParking(r,false);
+    node.querySelector(".save-tour").onclick=()=>saveTour(r);
+    node.querySelector(".start-tour").onclick=()=>startTour(r);
+    host.appendChild(node);
+  });
+}
+
+function initMap(){
+  if(typeof L==="undefined")throw new Error("Leaflet/Kartenbibliothek nicht geladen.");
+  state.layers={caches:L.layerGroup(),route:L.layerGroup()};
+  state.map=L.map("map").setView([49.39875,8.672434],12);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{
+    maxZoom:19, attribution:"© OpenStreetMap"
+  }).addTo(state.map);
+  state.layers.caches.addTo(state.map);
+  state.layers.route.addTo(state.map);
+}
+
+
+function mapPlannerSelectedCaches(){
+  return [...state.mapPlanner.selectedIds]
+    .map(id=>state.caches.find(c=>c.id===id))
+    .filter(Boolean);
+}
+
+function updateMapPlannerPanel(){
+  const panel=$("#mapPlannerPanel");
+  if(!panel)return;
+  panel.classList.toggle("hidden",!state.mapPlanner.active);
+  panel.classList.toggle("active",state.mapPlanner.active);
+  const caches=mapPlannerSelectedCaches();
+  $("#mapPlannerCount").textContent=`${caches.length} ausgewählt`;
+  const host=$("#mapPlannerSelection");
+  if(host){
+    host.innerHTML=caches.length
+      ? caches.map(c=>`<span class="map-plan-chip">${escapeHtml(c.id)} · ${escapeHtml(c.name)}</span>`).join("")
+      : "Noch keine Caches ausgewählt.";
+  }
+  const calc=$("#mapPlanCalculate");
+  if(calc)calc.disabled=caches.length===0;
+}
+
+function startMapPlanner(seedCurrent=false){
+  state.mapPlanner.active=true;
+  state.mapPlanner.selectedIds=new Set();
+  state.mapPlanner.sourceRoute=null;
+
+  if(seedCurrent && state.selectedRoute){
+    state.mapPlanner.sourceRoute=state.selectedRoute;
+    const seq=state.selectedRoute.real?.finalSequence || cacheSequence(state.selectedRoute);
+    seq.forEach(c=>state.mapPlanner.selectedIds.add(c.id));
+  }
+
+  updateMapPlannerPanel();
+  refreshCacheLayer();
+  switchTab("karte");
+  showToast(
+    seedCurrent && state.selectedRoute
+      ? "Aktuelle Route übernommen. Jetzt mehrere Caches an- oder abwählen; berechnet wird erst am Ende."
+      : "Freie Kartenplanung gestartet. Tippe mehrere Cachemarker an und berechne anschließend einmal.",
+    "success",6000
+  );
+}
+
+function cancelMapPlanner(){
+  state.mapPlanner.active=false;
+  state.mapPlanner.selectedIds=new Set();
+  state.mapPlanner.sourceRoute=null;
+  updateMapPlannerPanel();
+  refreshCacheLayer();
+}
+
+function clearMapPlanner(){
+  state.mapPlanner.selectedIds=new Set();
+  updateMapPlannerPanel();
+  refreshCacheLayer();
+}
+
+function toggleMapPlannerCache(cacheId){
+  if(!state.mapPlanner.active)return;
+  const cache=state.caches.find(c=>c.id===cacheId);
+  if(!cache)return;
+
+  if(state.mapPlanner.selectedIds.has(cacheId)){
+    state.mapPlanner.selectedIds.delete(cacheId);
+  }else{
+    const eligibility=cacheEligibleForManualRoute(cache);
+    if(!eligibility.ok){
+      showToast(`${cacheId} nicht auswählbar: ${eligibility.reason}.`,"warn",4500);
+      return;
+    }
+    state.mapPlanner.selectedIds.add(cacheId);
+  }
+  updateMapPlannerPanel();
+  refreshCacheLayer();
+}
+
+function approximateOpenChainDistance(seq){
+  let km=0;
+  for(let i=1;i<seq.length;i++)km+=haversine(seq[i-1],seq[i]);
+  return km;
+}
+
+function nearestNeighborChain(caches,startIndex){
+  const remaining=new Set(caches);
+  const seq=[];
+  let current=caches[startIndex];
+  seq.push(current);
+  remaining.delete(current);
+  while(remaining.size){
+    const next=[...remaining].sort((a,b)=>haversine(current,a)-haversine(current,b))[0];
+    seq.push(next);
+    remaining.delete(next);
+    current=next;
+  }
+  return seq;
+}
+
+function twoOptOpenChain(seq){
+  let best=[...seq];
+  let bestDist=approximateOpenChainDistance(best);
+  let improved=true;
+  let passes=0;
+  while(improved && passes<5){
+    improved=false;
+    passes++;
+    for(let i=1;i<best.length-1;i++){
+      for(let j=i+1;j<best.length;j++){
+        const trial=[...best.slice(0,i),...best.slice(i,j+1).reverse(),...best.slice(j+1)];
+        const d=approximateOpenChainDistance(trial);
+        if(d+0.001<bestDist){
+          best=trial;
+          bestDist=d;
+          improved=true;
+        }
+      }
+    }
+  }
+  return best;
+}
+
+async function optimizeSelectedCacheOrder(caches,opts){
+  if(caches.length<=2)return {seq:[...caches],violations:0,result:await footRouteSequence(caches)};
+
+  const approx=[];
+  const seedIndices=[...caches.keys()];
+  for(const seed of seedIndices){
+    const seq=twoOptOpenChain(nearestNeighborChain(caches,seed));
+    const key=seq.map(c=>c.id).join(">");
+    if(!approx.some(x=>x.key===key)){
+      approx.push({key,seq,km:approximateOpenChainDistance(seq)});
+      const rev=[...seq].reverse();
+      approx.push({key:rev.map(c=>c.id).join(">"),seq:rev,km:approximateOpenChainDistance(rev)});
+    }
+  }
+  approx.sort((a,b)=>a.km-b.km);
+
+  let best=null;
+  const tests=approx.slice(0,Math.min(6,approx.length));
+  for(let i=0;i<tests.length;i++){
+    setProgress(15+35*(i/Math.max(1,tests.length)),
+      `Optimiere Cache-Reihenfolge ${i+1}/${tests.length} über echte Fußwege …`,
+      "Freie Kartenplanung");
+    try{
+      const result=await footRouteSequence(tests[i].seq);
+      const violations=violationDetailsForSequence(tests[i].seq,result.legDurations,opts);
+      const score=violations.length*100000+(result.distance||0);
+      if(!best || score<best.score){
+        best={seq:tests[i].seq,result,violations:violations.length,violationDetails:violations,score};
+      }
+    }catch(e){}
+    if(i<tests.length-1)await sleep(250);
+  }
+  return best;
+}
+
+async function calculateMapPlanner(){
+  if(!state.mapPlanner.active || state.routeEditBusy)return;
+  const caches=mapPlannerSelectedCaches();
+  if(!caches.length){
+    showToast("Wähle mindestens einen Cache aus.","warn");
+    return;
+  }
+
+  const opts=getOpts(false);
+  state.routeEditBusy=true;
+  setProgress(8,`${caches.length} ausgewählte Caches werden optimiert …`,"Freie Kartenplanung");
+
+  try{
+    const optimized=await optimizeSelectedCacheOrder(caches,opts);
+    if(!optimized)throw new Error("Für die Auswahl konnte keine Fußweg-Reihenfolge berechnet werden.");
+
+    let allowViolations=false;
+    if(optimized.violations>0){
+      const details=optimized.violationDetails.slice(0,4)
+        .map(v=>`${v.from} → ${v.to}: ${fmtMin(v.min)}`)
+        .join("\n");
+      allowViolations=confirm(
+        `Die beste Reihenfolge enthält ${optimized.violations} Verbindung(en) über ${opts.maxGap} Minuten:\n\n${details}\n\n`+
+        `OK = alle ausgewählten Caches trotzdem behalten.\nAbbrechen = automatische Reparatur darf unpassende Caches entfernen.`
+      );
+    }
+
+    let route=state.mapPlanner.sourceRoute;
+    if(!route){
+      const centroid={
+        lat:caches.reduce((a,c)=>a+c.lat,0)/caches.length,
+        lon:caches.reduce((a,c)=>a+c.lon,0)/caches.length
+      };
+      route={
+        id:`manual-map-${Date.now()}`,
+        name:"Freie Kartenplanung",
+        displayName:`Freie Runde · ${caches.length} Caches`,
+        points:[...optimized.seq],
+        stats:routeStats(optimized.seq,opts),
+        startDistance:haversine(opts.start,centroid),
+        score:0
+      };
+      state.routes.unshift(route);
+    }else{
+      route.points=[...optimized.seq];
+      route.stats=routeStats(route.points,opts);
+      route.real=null;
+      route.manualParking=null;
+      route.precheck=null;
+      route.displayName=route.displayName||`Bearbeitete Runde · ${caches.length} Caches`;
+    }
+
+    route.manualAllowGapViolations=allowViolations;
+    route.manualSelectionLocked=true;
+    route.manualLockedCacheIds=caches.map(c=>c.id);
+    state.selectedRoute=route;
+
+    // Stop selection mode before drawing the result so normal cache popups return.
+    state.mapPlanner.active=false;
+    state.mapPlanner.selectedIds=new Set();
+    state.mapPlanner.sourceRoute=null;
+    updateMapPlannerPanel();
+    refreshCacheLayer();
+
+    const fakeButton={textContent:"Echtroute neu prüfen",disabled:false};
+    const result=await refineRoute(route,fakeButton);
+    if(result){
+      const missing=missingLockedCaches(result,result.real?.finalSequence||cacheSequence(result));
+      if(missing.length){
+        showToast(`Fehler: ${missing.length} fixierte Cache(s) fehlen. Ergebnis wurde nicht als gültig bestätigt.`,"error",7000);
+      }else{
+        showToast(`Kartenplanung berechnet: alle ${caches.length} ausgewählten Caches enthalten · ${result.stats.km.toFixed(1)} km.`,"success",6000);
+      }
+    }
+  }catch(e){
+    failProgress(e.message||"Kartenplanung fehlgeschlagen");
+    showToast(`Kartenplanung fehlgeschlagen: ${e.message}`,"error",6000);
+  }finally{
+    state.routeEditBusy=false;
+  }
+}
+
+function refreshCacheLayer(){
+  if(!state.map)return;
+  state.layers.caches.clearLayers();
+
+  state.caches.forEach(c=>{
+    const health=cacheHealth(c);
+    const selected=state.mapPlanner.active && state.mapPlanner.selectedIds.has(c.id);
+    const color=selected
+      ? "#17603f"
+      : health.warn
+        ? "#b42318"
+        : c.found
+          ? "#87968f"
+          : c.type==="Mystery"
+            ? "#7c3aed"
+            : c.type==="Multi"
+              ? "#2563eb"
+              : "#16a34a";
+
+    const marker=L.circleMarker([c.lat,c.lon],{
+      radius:selected?10:(health.warn?8:6),
+      color,
+      fillColor:color,
+      fillOpacity:selected?1:.85,
+      weight:selected?4:(health.warn?3:2)
+    });
+
+    if(state.mapPlanner.active){
+      marker.on("click",()=>{
+        toggleMapPlannerCache(c.id);
+      });
+      marker.bindTooltip(selected?"✓":"+",{
+        permanent:true,
+        direction:"center",
+        className:selected?"map-plan-selected-tooltip":"cache-warning-tooltip",
+        offset:[0,0]
+      });
+    }else{
+      marker.bindPopup(cachePopupHtml(c));
+      if(health.warn){
+        marker.bindTooltip("!",{permanent:true,direction:"center",className:"cache-warning-tooltip",offset:[0,0]});
+      }
+    }
+    marker.addTo(state.layers.caches);
+  });
+}
+
+function escapeHtml(s){
+  return String(s??"").replace(/[&<>"']/g,ch=>({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  }[ch]));
+}
+
+function routeSequenceHtml(r,seq){
+  const park=r.real?.parking;
+  const items=[];
+  if(park){
+    items.push(`<div class="route-sequence-item route-sequence-parking">
+      <div class="route-sequence-no">P</div>
+      <div class="route-sequence-main"><strong>${escapeHtml(park.name||"Parkplatz")}</strong><span>${park.roadside?"Straßenrand-Fallback · Beschilderung prüfen":"Start der Runde"}</span>
+        <div class="route-sequence-actions parking-move-action"><button class="ghost" onclick="window.cacheRundeMoveParking()">🅿 Parkplatz verschieben</button></div>
+      </div>
+      <div class="route-sequence-type">${park.roadside?"Straßenrand":"Parken"}</div>
+    </div>`);
+  }
+
+  seq.forEach((c,i)=>{
+    const health=cacheHealth(c);
+    const warning=health.warn
+      ? `<span class="route-sequence-warning">⚠ ${health.reasons.map(escapeHtml).join(" · ")}</span>`
+      : "";
+    const removeAction=seq.length>1
+      ? `<div class="route-sequence-actions"><button class="ghost" onclick="window.cacheRundeRemoveFromRoute('${String(c.id).replace(/'/g,"\\'")}')">− Entfernen</button></div>`
+      : "";
+    items.push(`<div class="route-sequence-item">
+      <div class="route-sequence-no">${health.warn?"!":i+1}</div>
+      <div class="route-sequence-main"><strong>${i+1}. ${escapeHtml(c.id)} · ${escapeHtml(c.name)}</strong><span>D ${c.difficulty??"—"} · T ${c.terrain??"—"}${c.corrected?" · Final ✓":""}</span>${warning}${removeAction}</div>
+      <div class="route-sequence-type">${escapeHtml(c.type||"Cache")}</div>
+    </div>`);
+  });
+
+  if(park){
+    items.push(`<div class="route-sequence-item route-sequence-parking">
+      <div class="route-sequence-no">P</div>
+      <div class="route-sequence-main"><strong>${escapeHtml(park.name||"Parkplatz")}</strong><span>Zurück zum Parkplatz</span></div>
+      <div class="route-sequence-type">Ziel</div>
+    </div>`);
+  }
+
+  return `<div class="route-sequence-panel">
+    <div class="route-sequence-title"><strong>Reihenfolge für manuelle Navigation</strong><span class="pill">${seq.length} Caches</span></div>
+    <div class="route-sequence-list">${items.join("")}</div>
+    ${lockedSelectionHtml(r)}
+    ${r.real?.manualParkingSequenceLocked?`<div class="parking-move-note"><strong>🅿 Manueller Parkplatz</strong>Der Parkplatz wurde manuell gesetzt; die Cache-Reihenfolge blieb beim Neuberechnen unverändert.</div>`:""}
+    <div class="route-edit-hint"><strong>Route auf der Karte bearbeiten</strong>Andere Cachemarker können hinzugefügt, vorhandene über den roten „Entfernen“-Button oder direkt hier aus der Liste entfernt werden. Eine bestätigte Mehrfachauswahl wird als fixierte Auswahl behandelt: CacheRunde darf keinen ausgewählten Cache still entfernen.</div>
+  </div>`;
+}
+
+function routeChangeHtml(r){
+  if(!r.real?.preliminary)return "";
+  const p=r.real.preliminary;
+  const finalCount=r.stats?.cacheCount||0;
+  const finalKm=r.stats?.km||0;
+  const countChanged=p.cacheCount!==finalCount;
+  const kmDiff=Math.abs((p.km||0)-finalKm);
+  if(!countChanged && kmDiff<0.35){
+    if(r.real.preservedAllCaches || r.real.repairReordered){
+      return `<div class="route-change-note good">Echtrouting: alle ${finalCount} Caches behalten; Einstieg/Reihenfolge wurde an echte Fußwege angepasst.</div>`;
+    }
+    return "";
+  }
+  const removed=r.real.removedCaches?.length
+    ? ` Entfernt: ${r.real.removedCaches.map(c=>escapeHtml(c.id)).join(", ")}.`
+    : "";
+  const label=p.source==="realistic-precheck"?"realistischen Vorprüfung":"Vorprüfung";
+  return `<div class="route-change-note"><strong>Abweichung zur ${label}:</strong> ${p.cacheCount} Caches / ${p.km.toFixed(1)} km → ${finalCount} Caches / ${finalKm.toFixed(1)} km.${removed}</div>`;
+}
+
+function showRouteOnMap(r){
+  state.selectedRoute=r;
+  state.layers.route.clearLayers();
+  let latlngs;
+  if(r.real?.geometry?.coordinates?.length){
+    latlngs=r.real.geometry.coordinates.map(c=>[c[1],c[0]]);
+    L.polyline(latlngs,{weight:5}).addTo(state.layers.route);
+    if(validRoutingPoint(r.real?.parking)){
+      L.marker([r.real.parking.lat,r.real.parking.lon],{title:"Parkplatz"})
+        .bindPopup(`<strong>🅿 ${r.real.parking?.name||"Startpunkt"}</strong><br>Start und Ende der Wanderung${r.real.parking?.roadside?`<br><strong>⚠ Straßenrand-Fallback:</strong> Beschilderung und örtliche Parkregeln prüfen.`:""}`)
+        .addTo(state.layers.route);
+    }
+  }else{
+    latlngs=r.points.map(p=>[p.lat,p.lon]);
+    L.polyline(latlngs,{weight:5,dashArray:"8,8"}).addTo(state.layers.route);
+  }
+  const seq=r.real?.finalSequence || cacheSequence(r);
+  seq.forEach((p,i)=>{
+    const health=cacheHealth(p);
+    const icon=L.divIcon({
+      className:`numbered-cache-marker${health.warn?" warning":""}`,
+      html:`<div>${health.warn?"!":i+1}</div>`,
+      iconSize:[28,28],
+      iconAnchor:[14,14],
+      popupAnchor:[0,-14]
+    });
+    L.marker([p.lat,p.lon],{title:`${i+1}. ${p.name}`,icon})
+      .bindPopup(cachePopupHtml(p,i))
+      .addTo(state.layers.route);
+  });
+  const b=L.latLngBounds(latlngs); state.map.fitBounds(b.pad(.2));
+  const mode=r.real?"Echtroute":"Vorprüfung";
+  const elevationBlock=r.real?.elevation
+    ? `<div style="width:100%;margin-top:8px"><div class="pill real-badge">Höhenprofil verfügbar</div>${elevationSvg(r.real.elevation)}</div>`
+    : `<div style="width:100%;margin-top:8px"><span class="pill warn-badge">Noch kein echtes Höhenprofil</span></div>`;
+  $("#mapInfo").innerHTML=`<div style="width:100%"><strong>${escapeHtml(r.displayName||r.name)} · ${mode}</strong><br><span>${r.stats.km.toFixed(1)} km · ${fmtMin(r.stats.totalMin)} · ${r.stats.cacheCount} Caches · ↑ ${Math.round(r.stats.gain)} m · ↓ ${Math.round(r.stats.loss)} m</span><div class="rule-explain"><strong>Cache-Abstandsregel:</strong> ${getOpts(false).maxGap} Minuten gelten nur zwischen zwei aufeinanderfolgenden Caches. Parkplatz→erster Cache und letzter Cache→Parkplatz sind davon ausgenommen. Der Rückweg nach dem letzten Cache darf vollständig ohne weitere Caches zum Parkplatz führen. Manuell bearbeitete Routen können die Regel auf Wunsch übersteuern.</div>${routeChangeHtml(r)}${routeHealthHtml(r)}${elevationBlock}${routeSequenceHtml(r,seq)}</div>`;
+  refreshCacheLayer();
+  switchTab("karte");
+}
+
+function downloadRouteGPX(r){
+  const esc=s=>String(s).replace(/[<>&'"]/g,ch=>({"<":"&lt;",">":"&gt;","&":"&amp;","'":"&apos;",'"':"&quot;"}[ch]));
+  const seq=r.real?.finalSequence || cacheSequence(r);
+  let trackPoints;
+  if(r.real?.geometry?.coordinates?.length){
+    trackPoints=r.real.geometry.coordinates.map(c=>({lon:c[0],lat:c[1]}));
+  }else{
+    trackPoints=r.points;
+  }
+  const trkpts=trackPoints.map(p=>`<trkpt lat="${p.lat}" lon="${p.lon}">${Number.isFinite(p.ele)?`<ele>${p.ele}</ele>`:""}</trkpt>`).join("");
+  const cacheWpts=seq.map(p=>`<wpt lat="${p.lat}" lon="${p.lon}"><name>${esc(p.id)}</name><desc>${esc(p.name)}</desc><type>${esc(p.type)}</type></wpt>`).join("");
+  const parkingWpt=(r.real && validRoutingPoint(r.real.parking))
+    ? `<wpt lat="${r.real.parking.lat}" lon="${r.real.parking.lon}"><name>Parking</name><desc>${esc(r.real.parking?.name||"Startpunkt")}</desc><type>Parking Area</type></wpt>`
+    : "";
+  const gpx=`<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="CacheRunde Prototype 0.2.0" xmlns="http://www.topografix.com/GPX/1/1">${parkingWpt}${cacheWpts}<trk><name>${esc(r.name)}</name><trkseg>${trkpts}</trkseg></trk></gpx>`;
+  const blob=new Blob([gpx],{type:"application/gpx+xml"}); const url=URL.createObjectURL(blob);
+  const a=document.createElement("a"); a.href=url; a.download=`${r.name.replace(/\W+/g,"-").toLowerCase()}${r.real?"-echtroute":""}.gpx`; a.click(); URL.revokeObjectURL(url);
+}
+
+async function search(quick=false){
+  setProgress(10,"Filter werden angewendet …","Tourensuche");
+  const opts=getOpts(quick);
+  state.routes=buildRoutes(opts);
+  const host=$(quick?"#quickResults":"#advancedResults");
+
+  if(state.routes.length && (opts.minCaches||0)>0){
+    host.innerHTML=`<div class="card"><strong>Prüfe Mindestzahl ${opts.minCaches} mit echten Fußwegen …</strong><p class="muted">Nur Routen, bei denen nach realer Cacheketten-Prüfung mindestens ${opts.minCaches} Caches übrig bleiben, werden angezeigt.</p></div>`;
+    state.routes=await validateMinimumCacheCount(state.routes,opts);
+  }
+
+  if(state.routes.length){
+    host.innerHTML='<div class="card"><strong>Prüfe die besten Vorschläge vollständig: Fußwege + Parkplatz …</strong></div>';
+    await precheckTopRoutes(state.routes,opts,4);
+  }
+
+  // Safety net: after any full preview, enforce the requested minimum once more.
+  if((opts.minCaches||0)>0){
+    state.routes=state.routes.filter(r=>{
+      const count=r.precheck?.full
+        ? (r.precheck.cacheCount||0)
+        : (r.minCacheCheck?.finalCount||r.stats?.cacheCount||0);
+      return count>=opts.minCaches;
+    });
+  }
+
+  setProgress(80,`${state.routes.length} Routenkandidat(en) vorbereitet. Ermittle Ortsnamen …`,"Tourensuche");
+  if(state.routes.length)host.innerHTML='<div class="card"><strong>Ermittle Ortsnamen …</strong></div>';
+  await enrichRouteNames(state.routes);
+  setProgress(90,"Ergebnisliste wird aufgebaut …","Tourensuche");
+  renderRoutes(
+    quick?"#quickResults":"#advancedResults",
+    state.routes,
+    quick?($("#quickSort")?.value||"quality"):($("#sortBy")?.value||"quality")
+  );
+  finishProgress(
+    state.routes.length
+      ? `${state.routes.length} Routenvorschlag/-vorschläge bereit.`
+      : ((opts.minCaches||0)>0
+          ? `Keine Route erfüllt nach echter Fußwegprüfung die Mindestzahl ${opts.minCaches}.`
+          : "Keine passende Route gefunden.")
+  );
+}
+
+function switchTab(name){
+  $$(".tab").forEach(t=>t.classList.toggle("active",t.id===`tab-${name}`));
+  $$(".nav-btn").forEach(b=>b.classList.toggle("active",b.dataset.tab===name));
+  if(name==="karte" && state.map) setTimeout(()=>state.map?.invalidateSize(),60);
+}
+
+async function loadGPXFile(file){
+  if(!file)return;
+  setProgress(5,`Lese ${file.name} …`,"GPX-Import");
+  try{
+    const text=await file.text();
+    if(!text || !/<gpx[\s>]/i.test(text)){
+      throw new Error("Die gewählte Datei scheint keine gültige GPX-Datei zu sein.");
+    }
+
+    const parsed=parseGPX(text);
+    if(!Array.isArray(parsed)){
+      throw new Error("GPX-Datei konnte nicht ausgewertet werden.");
+    }
+    if(parsed.length===0){
+      const xmlCheck=new DOMParser().parseFromString(text,"application/xml");
+      if(xmlCheck.querySelector("parsererror")){
+        throw new Error("Die GPX-Datei enthält ungültiges XML.");
+      }
+    }
+
+    state.caches=parsed;
+    setProgress(55,`${state.caches.length} Caches erkannt …`,"GPX-Import");
+    const ignoredImportWaypoints=state.gpxImportStats?.ignoredWaypoints||0;
+    $("#gpxStatus").textContent=ignoredImportWaypoints
+      ? `${state.caches.length} Caches geladen · ${ignoredImportWaypoints} Zusatzwegpunkt(e) ignoriert`
+      : `${state.caches.length} Caches geladen`;
+    $("#miniCacheCount").textContent=state.caches.length;
+
+    if(state.caches.length){
+      const avg=state.caches.reduce(
+        (a,c)=>({lat:a.lat+c.lat/state.caches.length,lon:a.lon+c.lon/state.caches.length}),
+        {lat:0,lon:0}
+      );
+      state.cacheCentroid=avg;
+      if(state.map){
+        state.map.setView([avg.lat,avg.lon],13);
+      }
+      if(!state.originExplicit){
+        setOrigin(avg.lat,avg.lon,"Automatisch: Mittelpunkt des importierten Cachegebiets",false);
+      }
+    }
+
+    refreshCacheLayer();
+    populateLogCacheSelect();
+    updateTripDataStatus();
+    try{refreshPersonalStats();}catch(e){}
+    finishProgress(
+      ignoredImportWaypoints
+        ? `${state.caches.length} Caches importiert · ${ignoredImportWaypoints} Zusatzwegpunkt(e) verworfen.`
+        : `${state.caches.length} Caches importiert.`
+    );
+    showToast(
+      ignoredImportWaypoints
+        ? `${state.caches.length} echte Caches importiert; ${ignoredImportWaypoints} Park-/Referenz-/Zusatzwegpunkt(e) ignoriert.`
+        : `${state.caches.length} Caches erfolgreich importiert.`,
+      "success",
+      ignoredImportWaypoints?5200:3200
+    );
+  }catch(e){
+    console.error("GPX import failed",e);
+    $("#gpxStatus").textContent="GPX-Import fehlgeschlagen";
+    failProgress(e.message||"GPX-Import fehlgeschlagen");
+    showToast(`GPX-Import fehlgeschlagen: ${e.message||e}`,"error",6000);
+  }
+}
+
+function setOrigin(lat,lon,label="Gewählter Punkt",explicit=true){
+  $("#startLat").value=Number(lat).toFixed(6);
+  $("#startLon").value=Number(lon).toFixed(6);
+  $("#originStatus").textContent=`Ausgangspunkt: ${label}`;
+  if(explicit)state.originExplicit=true;
+  if(state.map && typeof L!=="undefined"){
+    state.map.setView([lat,lon],13);
+    if(state.originMarker)state.map.removeLayer(state.originMarker);
+    state.originMarker=L.marker([lat,lon],{title:"Ausgangspunkt"}).addTo(state.map).bindPopup(`<strong>Ausgangspunkt</strong><br>${label}`);
+  }
+}
+
+function useCacheAreaOrigin(){
+  if(!state.cacheCentroid){alert("Noch keine GPX-Daten geladen.");return;}
+  setOrigin(state.cacheCentroid.lat,state.cacheCentroid.lon,"Mittelpunkt des importierten Cachegebiets");
+}
+
+async function searchOrigin(){
+  const q=$("#originSearch").value.trim(); if(!q)return;
+  const host=$("#originMatches"); host.innerHTML='<div class="muted">Suche …</div>';
+  try{
+    const res=await fetch(`/api/geocode?q=${encodeURIComponent(q)}&limit=6`,{cache:"no-store"});
+    const data=await res.json(); host.innerHTML="";
+    const items=data.results||[];
+    if(!items.length){host.innerHTML='<div class="muted">Keine Treffer.</div>';return;}
+    items.forEach(item=>{
+      const b=document.createElement("button");b.type="button";b.className="origin-match";
+      b.textContent=item.display_name||item.name;
+      b.onclick=()=>{setOrigin(+item.lat,+item.lon,item.display_name||item.name);host.innerHTML=""};
+      host.appendChild(b);
+    });
+  }catch(e){
+    host.innerHTML='<div class="muted">Ortsuche nicht erreichbar. Standort oder Karte verwenden.</div>';
+    showToast("Ortsuche ist derzeit nicht erreichbar.","warn");
+  }
+}
+function enableMapOriginPick(){
+  state.originPick=true; switchTab("karte"); $("#map").classList.add("map-pick-active");
+  $("#mapInfo").innerHTML="<strong>Ausgangspunkt wählen</strong><span>Auf die gewünschte Stelle der Karte klicken.</span>";
+}
+function useCurrentLocation(){
+  navigator.geolocation?.getCurrentPosition(pos=>{
+    setOrigin(pos.coords.latitude,pos.coords.longitude,"Mein Standort");
+  },()=>alert("Standort konnte nicht gelesen werden."));
+}
+
+
+
+class MockGeocachingProvider{
+  constructor(profile="normal"){
+    this.profile=profile;
+    this.connected=false;
+  }
+  async connect(username){
+    await sleep(500);
+    this.connected=true;
+    const premium=this.profile==="premium";
+    return {
+      username:username||"TestCacher",
+      membership:premium?"Premium":"Basic",
+      totalFinds:this.profile==="empty"?0:12847,
+      yearFinds:this.profile==="empty"?0:426
+    };
+  }
+  async sync(caches){
+    await sleep(700);
+    if(!this.connected)throw new Error("Provider nicht verbunden");
+    let finals=0,found=0;
+    caches.forEach((c,i)=>{
+      if(this.profile!=="empty" && i%11===0){c.found=true;found++;}
+      if(c.type==="Mystery" && !c.corrected && i%7===0){
+        c.corrected=true;
+        finals++;
+      }
+    });
+    return {foundUpdated:found,finalsUpdated:finals};
+  }
+  async submitLog(entry){
+    if(!this.connected)throw new Error("Provider nicht verbunden");
+    await sleep(400);
+    return {ok:true,remoteId:`mock-${Date.now()}-${Math.floor(Math.random()*1000)}`,...entry};
+  }
+}
+
+function createProvider(){
+  const type=$("#gcProvider")?.value||"mock";
+  if(type==="mock")return new MockGeocachingProvider($("#mockProfile")?.value||"normal");
+  throw new Error("Dieser Provider ist in diesem Build nicht verfügbar.");
+}
+
+async function connectGeocaching(){
+  try{
+    setProgress(20,"Verbinde Test Provider …","Geocaching");
+    state.gcProvider=createProvider();
+    const profile=await state.gcProvider.connect(state.profile.gcUsername||"TestCacher");
+    state.apiConnected=true;
+    $("#gcApiStatus").innerHTML=`<span class="provider-ok">Verbunden:</span> ${profile.username} · ${profile.membership} · ${profile.totalFinds} Funde · ${profile.yearFinds} dieses Jahr`;
+    $("#statTotalFinds").textContent=profile.totalFinds;
+    $("#statYearFinds").textContent=profile.yearFinds;
+    finishProgress("Test Provider verbunden.");
+  }catch(e){
+    state.apiConnected=false;
+    failProgress(e.message);
+    $("#gcApiStatus").textContent=`Verbindung fehlgeschlagen: ${e.message}`;
+  }
+}
+
+function disconnectGeocaching(){
+  state.gcProvider=null;
+  state.apiConnected=false;
+  $("#gcApiStatus").textContent="Nicht verbunden.";
+}
+
+async function syncGeocaching(){
+  if(!state.gcProvider){alert("Bitte zuerst Test Provider verbinden.");return;}
+  try{
+    setProgress(15,"Synchronisiere Funde und Mystery-Finals …","Geocaching Sync");
+    const r=await state.gcProvider.sync(state.caches);
+    refreshCacheLayer();
+    populateLogCacheSelect();
+    finishProgress(`Sync fertig: ${r.foundUpdated} Fundstatus, ${r.finalsUpdated} Mystery-Finals aktualisiert.`);
+    $("#gcApiStatus").textContent=`Letzter Sync: ${r.foundUpdated} Fundstatus · ${r.finalsUpdated} Mystery-Finals aktualisiert.`;
+  }catch(e){
+    failProgress(e.message);
+  }
+}
+
+function populateLogCacheSelect(){
+  const sel=$("#logCacheSelect");
+  if(!sel)return;
+  sel.innerHTML="";
+  state.caches.slice(0,500).forEach(c=>{
+    const o=document.createElement("option");
+    o.value=c.id;
+    o.textContent=`${c.id} · ${c.name}`;
+    sel.appendChild(o);
+  });
+}
+
+function updateLogQueueStatus(){
+  const el=$("#logQueueStatus");
+  if(!el)return;
+  el.textContent=state.pendingLogs.length
+    ? `${state.pendingLogs.length} Log(s) vorgemerkt.`
+    : "Keine Logs vorgemerkt.";
+}
+
+function queueLog(){
+  const cacheId=$("#logCacheSelect").value;
+  if(!cacheId){alert("Bitte Cache wählen.");return;}
+  state.pendingLogs.push({
+    cacheId,
+    type:$("#logType").value,
+    text:$("#logText").value.trim(),
+    date:new Date().toISOString()
+  });
+  persistTourState();
+  $("#logText").value="";
+  updateLogQueueStatus();
+}
+
+async function sendQueuedLogs(){
+  if(!state.gcProvider){alert("Bitte Test Provider verbinden.");return;}
+  if(!state.pendingLogs.length){alert("Keine Logs vorgemerkt.");return;}
+  const pending=[...state.pendingLogs];
+  const sent=[];
+  try{
+    for(let i=0;i<pending.length;i++){
+      setProgress(10+80*(i/pending.length),`Sende Log ${i+1} von ${pending.length} …`,"Logs senden");
+      const result=await state.gcProvider.submitLog(pending[i]);
+      sent.push(result);
+      const cache=state.caches.find(c=>c.id===pending[i].cacheId);
+      if(cache && pending[i].type==="Found it"){
+        cache.found=true;
+        markCacheCompleted(cache.id);
+      }
+    }
+    state.pendingLogs=[];
+    persistTourState();
+    refreshCacheLayer();
+    updateLogQueueStatus();
+    finishProgress(`${sent.length} Test-Log(s) erfolgreich gesendet.`);
+  }catch(e){
+    failProgress(e.message);
+  }
+}
+
+
+function persistTourState(){
+  localStorage.setItem("cacherunde-data-version",String(DATA_VERSION));
+  localStorage.setItem("cacherunde-saved-tours",JSON.stringify(state.savedTours));
+  localStorage.setItem("cacherunde-pending-logs",JSON.stringify(state.pendingLogs));
+  localStorage.setItem("cacherunde-active-tour",JSON.stringify(state.activeTour));
+  localStorage.setItem("cacherunde-saved-trips",JSON.stringify(state.savedTrips));
+}
+
+function loadTourState(){
+  state.savedTours=safeJsonParse(localStorage.getItem("cacherunde-saved-tours"),[]);
+  state.pendingLogs=safeJsonParse(localStorage.getItem("cacherunde-pending-logs"),[]);
+  state.activeTour=safeJsonParse(localStorage.getItem("cacherunde-active-tour"),null);
+  state.savedTrips=safeJsonParse(localStorage.getItem("cacherunde-saved-trips"),[]);
+  if(!Array.isArray(state.savedTours))state.savedTours=[];
+  if(!Array.isArray(state.savedTrips))state.savedTrips=[];
+  if(!Array.isArray(state.pendingLogs))state.pendingLogs=[];
+  updateLogQueueStatus();
+  renderSavedTours();
+  renderSavedTrips();
+  renderActiveTour();
+}
+
+function serializableTour(r){
+  return {
+    id:r.id||`saved-${Date.now()}`,
+    name:r.name,
+    displayName:r.displayName||r.name,
+    stats:r.stats,
+    points:r.points,
+    real:r.real||null,
+    manualAllowGapViolations:!!r.manualAllowGapViolations,
+    manualSelectionLocked:!!r.manualSelectionLocked,
+    manualLockedCacheIds:Array.isArray(r.manualLockedCacheIds)?[...r.manualLockedCacheIds]:[],
+    savedAt:new Date().toISOString()
+  };
+}
+
+function saveTour(r){
+  const t=serializableTour(r);
+  const idx=state.savedTours.findIndex(x=>x.id===t.id);
+  if(idx>=0)state.savedTours[idx]=t;
+  else state.savedTours.unshift(t);
+  persistTourState();
+  renderSavedTours();
+  showToast("Tour gespeichert.","success");
+}
+
+function startTour(r){
+  const t=serializableTour(r);
+  const seq=t.real?.finalSequence || cacheSequence(t);
+  state.activeTour={
+    ...t,
+    status:"active",
+    startedAt:new Date().toISOString(),
+    completedCacheIds:[],
+    sequenceIds:seq.map(c=>c.id)
+  };
+  persistTourState();
+  renderActiveTour();
+  showRouteOnMap(t);
+  switchTab("karte");
+}
+
+function activeSeq(){
+  if(!state.activeTour)return [];
+  return state.activeTour.real?.finalSequence || cacheSequence(state.activeTour);
+}
+
+function activeProgressStats(){
+  const t=state.activeTour;
+  if(!t)return {remainingCaches:0,remainingKm:0,remainingTime:0,found:0};
+  const seq=activeSeq();
+  const done=new Set(t.completedCacheIds||[]);
+  const remainingCaches=seq.filter(c=>!done.has(c.id)).length;
+  const ratio=seq.length?remainingCaches/seq.length:0;
+  return {
+    remainingCaches,
+    remainingKm:(t.stats?.km||0)*ratio,
+    remainingTime:(t.stats?.totalMin||0)*ratio,
+    found:done.size
+  };
+}
+
+function renderActiveTour(){
+  const panel=$("#activeTourPanel");
+  if(!panel)return;
+  if(!state.activeTour){panel.classList.add("hidden");return;}
+  panel.classList.remove("hidden");
+  $("#activeTourName").textContent=state.activeTour.displayName||state.activeTour.name||"Aktive Tour";
+  $("#activeTourState").textContent=state.activeTour.status||"active";
+  const s=activeProgressStats();
+  $("#activeRemainingCaches").textContent=s.remainingCaches;
+  $("#activeRemainingKm").textContent=`${s.remainingKm.toFixed(1)} km`;
+  $("#activeRemainingTime").textContent=fmtMin(s.remainingTime);
+  $("#activeFoundCount").textContent=s.found;
+}
+
+function pauseTour(){
+  if(!state.activeTour)return;
+  state.activeTour.status="paused";
+  persistTourState();
+  renderActiveTour();
+}
+
+function resumeTour(){
+  if(!state.activeTour)return;
+  state.activeTour.status="active";
+  persistTourState();
+  renderActiveTour();
+}
+
+function finishTour(){
+  if(!state.activeTour)return;
+  state.activeTour.status="finished";
+  persistTourState();
+  renderActiveTour();
+  setTimeout(()=>{
+    state.activeTour=null;
+    persistTourState();
+    renderActiveTour();
+  },700);
+}
+
+function renderSavedTours(){
+  const host=$("#savedTours");
+  if(!host)return;
+  host.innerHTML="";
+  const q=($("#savedTourSearch")?.value||"").trim().toLowerCase();
+  const mode=$("#savedTourSort")?.value||"recent";
+  let tours=[...state.savedTours].filter(t=>(t.displayName||t.name||"").toLowerCase().includes(q));
+  tours.sort((a,b)=>{
+    if(mode==="name")return (a.displayName||a.name||"").localeCompare(b.displayName||b.name||"");
+    if(mode==="distance")return (a.stats?.km||0)-(b.stats?.km||0);
+    if(mode==="caches")return (b.stats?.cacheCount||0)-(a.stats?.cacheCount||0);
+    return new Date(b.savedAt||0)-new Date(a.savedAt||0);
+  });
+  if(!tours.length){
+    host.innerHTML='<div class="muted">Keine gespeicherte Tour passend zur Auswahl.</div>';
+    return;
+  }
+  tours.forEach(t=>{
+    const card=document.createElement("article");
+    card.className="route-card card";
+    card.innerHTML=`<div class="route-head"><div><span class="rank">Gespeichert</span><h3>${t.displayName||t.name}</h3></div><span class="pill">${t.stats?.cacheCount||0} Caches</span></div>
+      <div class="route-metrics">
+        <div class="metric"><strong>${(t.stats?.km||0).toFixed(1)} km</strong><span>Strecke</span></div>
+        <div class="metric"><strong>${fmtMin(t.stats?.totalMin||0)}</strong><span>Dauer</span></div>
+      </div>
+      <div class="route-actions">
+        <button class="ghost saved-map">Karte</button>
+        <button class="primary saved-start">Starten</button>
+        <button class="ghost saved-rename">Umbenennen</button>
+        <button class="ghost saved-copy">Duplizieren</button>
+        <button class="ghost saved-delete">Löschen</button>
+      </div>`;
+    card.querySelector(".saved-map").onclick=()=>showRouteOnMap(t);
+    card.querySelector(".saved-start").onclick=()=>startTour(t);
+    card.querySelector(".saved-rename").onclick=()=>renameSavedTour(t);
+    card.querySelector(".saved-copy").onclick=()=>duplicateSavedTour(t);
+    card.querySelector(".saved-delete").onclick=()=>{
+      state.savedTours=state.savedTours.filter(x=>x.id!==t.id);persistTourState();renderSavedTours();
+    };
+    host.appendChild(card);
+  });
+}
+
+function markCacheCompleted(cacheId){
+  if(!state.activeTour)return;
+  const set=new Set(state.activeTour.completedCacheIds||[]);
+  set.add(cacheId);
+  state.activeTour.completedCacheIds=[...set];
+  persistTourState();
+  renderActiveTour();
+}
+
+
+function cacheEligibleForManualRoute(cache){
+  if(!cache || cache.found)return {ok:false,reason:"bereits gefunden"};
+  if(cache.type==="Multi")return {ok:false,reason:"Multicache ist standardmäßig ausgeschlossen"};
+  if(cache.type==="Mystery" && !cache.corrected)return {ok:false,reason:"Mystery ohne erkanntes Final"};
+  if(!["Traditional","Mystery"].includes(cache.type))return {ok:false,reason:"Cachetyp nicht für die Runde freigegeben"};
+  return {ok:true,reason:""};
+}
+
+function routeContainsCache(route,cacheId){
+  const seq=route?.real?.finalSequence || (route?cacheSequence(route):[]);
+  return seq.some(c=>c.id===cacheId);
+}
+
+function bestInsertionIndex(seq,cache){
+  if(seq.length<=1)return seq.length;
+  let bestIndex=seq.length;
+  let bestDelta=Infinity;
+
+  // Treat the cache order as a round. Parking optimization can later choose
+  // which edge becomes the break.
+  for(let i=0;i<seq.length;i++){
+    const a=seq[i],b=seq[(i+1)%seq.length];
+    const delta=haversine(a,cache)+haversine(cache,b)-haversine(a,b);
+    if(delta<bestDelta){
+      bestDelta=delta;
+      bestIndex=i+1;
+    }
+  }
+  return bestIndex;
+}
+
+
+async function findBestRealInsertion(seq,cache,opts){
+  if(!seq.length)return {seq:[cache],mode:"single",violations:0,score:0};
+
+  let best=null;
+  let bestFallback=null;
+  const positions=[];
+  positions.push({index:0,left:null,right:seq[0]});
+  for(let i=1;i<seq.length;i++){
+    positions.push({index:i,left:seq[i-1],right:seq[i]});
+  }
+  positions.push({index:seq.length,left:seq[seq.length-1],right:null});
+
+  for(let pi=0;pi<positions.length;pi++){
+    const pos=positions[pi];
+    let leftSec=0,rightSec=0,leftOk=true,rightOk=true;
+    try{
+      if(pos.left){
+        const r=await footRouteRequest([pos.left,cache],false);
+        leftSec=r.duration||0;
+        leftOk=leftSec<=opts.maxGap*60;
+      }
+      if(pos.right){
+        const r=await footRouteRequest([cache,pos.right],false);
+        rightSec=r.duration||0;
+        rightOk=rightSec<=opts.maxGap*60;
+      }
+    }catch(e){
+      continue;
+    }
+
+    const inserted=[...seq.slice(0,pos.index),cache,...seq.slice(pos.index)];
+    const violations=(leftOk?0:1)+(rightOk?0:1);
+    const score=leftSec+rightSec+violations*100000;
+    const info={
+      seq:inserted,
+      mode:(pos.index===0||pos.index===seq.length)?"chain-end":"internal",
+      violations,score,left:pos.left,right:pos.right,leftSec,rightSec
+    };
+
+    if(violations===0 && (!best||score<best.score))best=info;
+    if(!bestFallback || Math.max(leftSec,rightSec)<Math.max(bestFallback.leftSec,bestFallback.rightSec)){
+      bestFallback=info;
+    }
+    if(pi<positions.length-1)await sleep(250);
+  }
+  return best||bestFallback;
+}
+
+async function precheckCandidateRoute(route,opts){
+  const originalSeq=cacheSequence(route);
+  if(originalSeq.length<1)return route;
+
+  try{
+    // Use the SAME repair logic as the later Echtroute. This means cache count and
+    // sequence should no longer change dramatically after the user clicks refine.
+    let repaired;
+    if(route.prevalidatedSequence?.length && route.prevalidatedResult){
+      repaired={
+        seq:route.prevalidatedSequence,
+        result:route.prevalidatedResult,
+        removed:route.minCacheCheck?.removedCaches||[],
+        reordered:false,
+        violations:0,
+        violationDetails:[]
+      };
+    }else{
+      repaired=await routeAndRepairSequence(originalSeq,opts,null,{allowViolations:false});
+    }
+    let finalSeq=repaired.seq;
+    let cacheReal=repaired.result;
+    if(!finalSeq?.length || !cacheReal)throw new Error("Keine belastbare Cachekette");
+
+    let parkings=[];
+    let parking=null;
+    try{
+      const parkingPromise=findParkingCandidates(
+        finalSeq[0],finalSeq[finalSeq.length-1],finalSeq,opts.parkingMode||"fallback"
+      );
+      const timeoutPromise=new Promise((_,reject)=>setTimeout(()=>reject(new Error("preview-parking-timeout")),8500));
+      parkings=await Promise.race([parkingPromise,timeoutPromise]);
+      parking=parkings?.[0]||null;
+    }catch(e){}
+
+    if(!parking){
+      parking={...finalSeq[0],name:"Vorläufig: Start am ersten Cache",parkingScore:null,previewFallback:true};
+    }
+
+    // Reuse the same parking/entry optimizer, just with fewer expensive real tests.
+    let parkingPlan=null;
+    if(parkings.length){
+      parkingPlan=await optimizeParkingAndEntry(finalSeq,parkings,opts,null,cacheReal,3,false);
+    }
+
+    let toFirst,fromLast;
+    let entryCacheId=finalSeq[0]?.id||null;
+    let walkingDirection="vorwärts";
+
+    if(parkingPlan){
+      parking=parkingPlan.parking;
+      finalSeq=parkingPlan.seq;
+      cacheReal=parkingPlan.cacheReal;
+      toFirst=parkingPlan.toFirst;
+      fromLast=parkingPlan.fromLast;
+      entryCacheId=parkingPlan.entryCacheId;
+      walkingDirection=parkingPlan.direction;
+    }else{
+      toFirst=(parking.lat===finalSeq[0].lat && parking.lon===finalSeq[0].lon)
+        ? {distance:0,duration:0,geometry:{coordinates:[[parking.lon,parking.lat]]}}
+        : await footRouteRequest([parking,finalSeq[0]],false);
+      fromLast=await footRouteRequest([finalSeq[finalSeq.length-1],parking],false);
+    }
+
+    const walkingDistance=(toFirst.distance||0)+(cacheReal.distance||0)+(fromLast.distance||0);
+    const walkingDuration=(toFirst.duration||0)+(cacheReal.duration||0)+(fromLast.duration||0);
+    const totalDuration=walkingDuration+finalSeq.length*opts.stopTime*60;
+    const geometry={
+      type:"LineString",
+      coordinates:mergeGeometries(toFirst.geometry,cacheReal.geometry,fromLast.geometry)
+    };
+
+    route.precheck={
+      checked:true,
+      full:true,
+      originalCacheCount:originalSeq.length,
+      finalSequence:finalSeq,
+      cacheCount:finalSeq.length,
+      removedCaches:repaired.removed||[],
+      reordered:!!repaired.reordered,
+      cacheDistance:cacheReal.distance||0,
+      cacheDuration:cacheReal.duration||0,
+      walkingDistance,
+      walkingDuration,
+      totalDuration,
+      parking,
+      parkingAutomatic:parkings.length>0,
+      parkingCandidates:parkings.length,
+      entryCacheId,
+      walkingDirection,
+      maxCacheLegSec:Math.max(0,...(cacheReal.legDurations||[])),
+      violations:repaired.violations||0,
+      violationDetails:repaired.violationDetails||[],
+      overlapRatio:overlapRatio(geometry.coordinates),
+      geometry,
+      checkedAt:new Date().toISOString()
+    };
+  }catch(e){
+    route.precheck={checked:false,full:false,error:e.message||String(e)};
+  }
+  return route;
+}
+
+
+async function validateMinimumCacheCount(routes,opts){
+  const minCaches=opts.minCaches||0;
+  if(minCaches<=0)return routes;
+
+  const kept=[];
+  for(let i=0;i<routes.length;i++){
+    const route=routes[i];
+    setProgress(
+      38+14*(i/Math.max(1,routes.length)),
+      `Prüfe Mindestzahl ${minCaches}: Kandidat ${i+1}/${routes.length} über echte Fußwege …`,
+      "Tourensuche"
+    );
+
+    try{
+      const originalSeq=cacheSequence(route);
+      const repaired=await routeAndRepairSequence(originalSeq,opts,null,{allowViolations:false});
+      const finalCount=repaired.seq?.length||0;
+
+      route.minCacheCheck={
+        checked:true,
+        requested:minCaches,
+        originalCount:originalSeq.length,
+        finalCount,
+        removedCaches:repaired.removed||[],
+        finalSequence:repaired.seq||[],
+        result:repaired.result||null,
+        passed:finalCount>=minCaches
+      };
+
+      if(finalCount>=minCaches){
+        // Reuse the already repaired cache chain during the later full preview.
+        route.prevalidatedSequence=repaired.seq;
+        route.prevalidatedResult=repaired.result;
+        kept.push(route);
+      }
+    }catch(e){
+      route.minCacheCheck={
+        checked:false,
+        requested:minCaches,
+        originalCount:cacheSequence(route).length,
+        finalCount:0,
+        passed:false,
+        error:e.message||String(e)
+      };
+    }
+
+    if(i<routes.length-1)await sleep(250);
+  }
+  return kept;
+}
+
+function minCacheCheckHtml(r){
+  const c=r.minCacheCheck;
+  if(!c)return "";
+  if(c.passed){
+    const changed=c.originalCount!==c.finalCount
+      ? ` · reale Prüfung ${c.originalCount} → ${c.finalCount}`
+      : "";
+    return `<div class="min-cache-check">✓ Mindestzahl ${c.requested} verbindlich geprüft${changed}</div>`;
+  }
+  return "";
+}
+
+async function precheckTopRoutes(routes,opts,limit=4){
+  const top=routes.slice(0,Math.min(limit,routes.length));
+  for(let i=0;i<top.length;i++){
+    setProgress(52+30*(i/Math.max(1,top.length)),
+      `Berechne realistische Vorprüfung ${i+1}/${top.length}: Fußwege + Parkplatz …`,
+      "Tourensuche");
+    await precheckCandidateRoute(top[i],opts);
+    if(i<top.length-1)await sleep(300);
+  }
+
+  // Full previews first, then fewest violations, then shortest real total walking route.
+  routes.sort((a,b)=>{
+    const af=a.precheck?.full?0:1, bf=b.precheck?.full?0:1;
+    if(af!==bf)return af-bf;
+    const av=a.precheck?.violations??999, bv=b.precheck?.violations??999;
+    if(av!==bv)return av-bv;
+    const ad=a.precheck?.walkingDistance??Infinity, bd=b.precheck?.walkingDistance??Infinity;
+    if(ad!==bd)return ad-bd;
+    return a.startDistance-b.startDistance;
+  });
+  return routes;
+}
+
+function previewStats(r){
+  if(r.real){
+    return {
+      km:r.stats?.km||0,
+      totalMin:r.stats?.totalMin||0,
+      cacheCount:r.stats?.cacheCount||0,
+      gain:r.stats?.gain||0,
+      loss:r.stats?.loss||0
+    };
+  }
+  const p=r.precheck;
+  if(p?.full){
+    return {
+      km:(p.walkingDistance||0)/1000,
+      totalMin:(p.totalDuration||0)/60,
+      cacheCount:p.cacheCount||0,
+      gain:r.stats?.gain||0,
+      loss:r.stats?.loss||0
+    };
+  }
+  return {
+    km:r.stats?.km||0,
+    totalMin:r.stats?.totalMin||0,
+    cacheCount:r.stats?.cacheCount||0,
+    gain:r.stats?.gain||0,
+    loss:r.stats?.loss||0
+  };
+}
+
+function precheckHtml(r,opts){
+  const p=r.precheck;
+  if(!p)return `<div class="route-precheck warn">Schnellschätzung – realistische Vorprüfung noch nicht durchgeführt.</div>`;
+  if(!p.checked)return `<div class="route-precheck warn">Realistische Vorprüfung nicht verfügbar${p.error?`: ${escapeHtml(p.error)}`:""}.</div>`;
+
+  if(p.full){
+    const removed=p.removedCaches?.length
+      ? `<br>⚠ ${p.removedCaches.length} Cache(s) bereits in der Vorprüfung entfernt: ${p.removedCaches.map(c=>escapeHtml(c.id)).join(", ")}`
+      : "";
+    const parking=p.parking?.previewFallback
+      ? "vorläufiger Start am ersten Cache"
+      : escapeHtml(p.parking?.name||"Parkplatz");
+    return `<div class="preview-real-box${p.violations?" warn":""}">
+      <strong>✓ Realistische Vorprüfung: ${p.cacheCount} Caches · ${(p.walkingDistance/1000).toFixed(1)} km · ${fmtMin(p.totalDuration/60)}</strong>
+      Echte Fußwege + Hin-/Rückweg · Start: ${parking}<br>
+      max. Cache→Cache: ${fmtMin(p.maxCacheLegSec/60)}${p.entryCacheId?` · Einstieg ${escapeHtml(p.entryCacheId)}`:""}${removed}
+      <div class="preview-delta">Die Echtroute verwendet diese Cachefolge als Ausgangsbasis; größere Sprünge sollten nur noch durch genauere Parkplatzoptimierung oder alternative Rückwege entstehen.</div>
+    </div>`;
+  }
+
+  if(p.violations===0){
+    return `<div class="route-precheck">✓ Echte Cache→Cache-Wege vorgeprüft · max. ${fmtMin(p.maxCacheLegSec/60)} · Cachekette ${(p.cacheDistance/1000).toFixed(1)} km</div>`;
+  }
+  const detail=(p.violationDetails||[]).slice(0,2).map(v=>`${v.from}→${v.to}: ${fmtMin(v.min)}`).join(" · ");
+  return `<div class="route-precheck warn">⚠ ${p.violations} reale Verbindung(en) über ${opts.maxGap} min${detail?` · ${detail}`:""}</div>`;
+}
+
+async function addCacheToSelectedRoute(cacheId){
+  const route=state.selectedRoute;
+  if(!route || state.routeEditBusy)return;
+  const cache=state.caches.find(c=>c.id===cacheId);
+  if(!cache)return;
+
+  const eligibility=cacheEligibleForManualRoute(cache);
+  if(!eligibility.ok){
+    showToast(`Cache kann nicht eingefügt werden: ${eligibility.reason}.`,"warn",5000);
+    return;
+  }
+  if(routeContainsCache(route,cacheId)){
+    showToast(`${cacheId} ist bereits Teil der Runde.`,"warn");
+    return;
+  }
+
+  const current=route.real?.finalSequence || cacheSequence(route);
+  const opts=getOpts(false);
+  state.routeEditBusy=true;
+  showToast(`Prüfe alle möglichen Einfügepositionen für ${cacheId} mit echten Fußwegen …`,"info",5000);
+
+  try{
+    const insertion=await findBestRealInsertion(current,cache,opts);
+    if(!insertion){
+      showToast(`${cacheId}: Fußwege konnten nicht geprüft werden.`,"error",5000);
+      return;
+    }
+
+    let allowViolations=false;
+    if(insertion.violations>0){
+      const leftText=insertion.left
+        ? `${insertion.left.id} → ${cacheId}: ${fmtMin(insertion.leftSec/60)}`
+        : `${cacheId} als erster Cache`;
+      const rightText=insertion.right
+        ? `${cacheId} → ${insertion.right.id}: ${fmtMin(insertion.rightSec/60)}`
+        : `${cacheId} als letzter Cache`;
+      const msg=`${cacheId} passt nach echter Fußwegprüfung in keine Position vollständig unter ${opts.maxGap} Minuten.\n\n`+
+        `Beste gefundene Einfügung:\n${leftText}\n${rightText}\n\n`+
+        `Trotzdem einfügen und die Cache-Abstandsregel für diese manuell bearbeitete Route übersteuern?`;
+      allowViolations=confirm(msg);
+      if(!allowViolations){
+        showToast(`${cacheId} nicht eingefügt. Die genaue problematische Verbindung wurde angezeigt.`,"warn",5500);
+        return;
+      }
+    }
+
+    route.points=[...insertion.seq,insertion.seq[0]];
+    route.real=null;
+    route.manualParking=null;
+    route.manualAllowGapViolations=allowViolations;
+    route.manualSelectionLocked=true;
+    route.manualLockedCacheIds=insertion.seq.map(c=>c.id);
+    route.stats=routeStats(route.points,opts);
+
+    refreshCacheLayer();
+    showRouteOnMap(route);
+
+    if(insertion.mode==="chain-end" && !allowViolations){
+      showToast(`${cacheId} passt am Anfang/Ende der Cachekette. Der Rückweg zum Parkplatz darf cachefrei sein.`,"success",5500);
+    }else if(allowViolations){
+      showToast(`${cacheId} wird mit manueller Regelabweichung beibehalten. Echtroute wird neu berechnet …`,"warn",5500);
+    }else{
+      showToast(`${cacheId} passt nach echter Fußwegprüfung. Echtroute wird neu berechnet …`,"success",4500);
+    }
+
+    const fakeButton={textContent:"Echtroute neu prüfen",disabled:false};
+    const result=await refineRoute(route,fakeButton);
+    const stillIncluded=(route.real?.finalSequence||cacheSequence(route)).some(c=>c.id===cacheId);
+    if(result && stillIncluded){
+      showToast(`${cacheId} wurde in die Runde übernommen.`,"success",4500);
+    }
+  }finally{
+    state.routeEditBusy=false;
+    refreshCacheLayer();
+  }
+}
+
+window.cacheRundeAddToRoute=(cacheId)=>addCacheToSelectedRoute(cacheId);
+
+async function removeCacheFromSelectedRoute(cacheId){
+  const route=state.selectedRoute;
+  if(!route || state.routeEditBusy)return;
+
+  const current=route.real?.finalSequence || cacheSequence(route);
+  if(!current.some(c=>c.id===cacheId)){
+    showToast(`${cacheId} ist nicht Teil der aktuellen Runde.`,"warn");
+    return;
+  }
+  if(current.length<=1){
+    showToast("Der letzte Cache kann nicht entfernt werden. Entferne stattdessen die gesamte Tour.","warn",5000);
+    return;
+  }
+
+  const cache=current.find(c=>c.id===cacheId);
+  const next=current.filter(c=>c.id!==cacheId);
+  const ok=confirm(`${cacheId}${cache?.name?` · ${cache.name}`:""} aus der aktuellen Runde entfernen und neu berechnen?`);
+  if(!ok)return;
+
+  route.points=[...next,next[0]];
+  route.real=null;
+  route.manualParking=null;
+  route.manualAllowGapViolations=false;
+  if(Array.isArray(route.manualLockedCacheIds)){
+    route.manualLockedCacheIds=route.manualLockedCacheIds.filter(id=>id!==cacheId);
+    route.manualSelectionLocked=route.manualLockedCacheIds.length>0;
+  }
+  route.stats=routeStats(route.points,getOpts(false));
+
+  state.routeEditBusy=true;
+  refreshCacheLayer();
+  showRouteOnMap(route);
+  showToast(`${cacheId} entfernt. Route und Parkplatz werden neu berechnet …`,"success",4500);
+
+  const fakeButton={textContent:"Echtroute neu prüfen",disabled:false};
+  try{
+    const result=await refineRoute(route,fakeButton);
+    if(result){
+      showToast(`${cacheId} entfernt und Echtroute neu berechnet.`,"success",4500);
+    }
+  }finally{
+    state.routeEditBusy=false;
+    refreshCacheLayer();
+  }
+}
+window.cacheRundeRemoveFromRoute=(cacheId)=>removeCacheFromSelectedRoute(cacheId);
+
+
+function cachePopupHtml(cache,index=null){
+  const isDone=state.activeTour?.completedCacheIds?.includes(cache.id);
+  const safeId=String(cache.id).replace(/'/g,"\\'");
+  const health=cacheHealth(cache);
+  const warning=health.warn
+    ? `<div class="cache-health-warning">⚠ ${health.reasons.map(escapeHtml).join(" · ")}</div>`
+    : "";
+
+  let routeEdit="";
+  if(state.selectedRoute){
+    const eligible=cacheEligibleForManualRoute(cache);
+    const already=routeContainsCache(state.selectedRoute,cache.id);
+    if(!already && eligible.ok){
+      routeEdit=`<button class="cache-add-route" onclick="window.cacheRundeAddToRoute('${safeId}')">＋ Sofort hinzufügen & neu berechnen</button>`;
+    }else if(already){
+      const routeCount=(state.selectedRoute.real?.finalSequence || cacheSequence(state.selectedRoute)).length;
+      routeEdit=`<div class="muted" style="margin-top:6px">✓ Bereits in der aktuellen Route</div>`+
+        `${routeCount>1?`<button class="cache-remove-route route-edit-primary" onclick="window.cacheRundeRemoveFromRoute('${safeId}')">− Aus aktueller Route entfernen & neu berechnen</button>`:""}`;
+    }else{
+      routeEdit=`<div class="muted" style="margin-top:6px">Nicht einfügbar: ${escapeHtml(eligible.reason)}</div>`;
+    }
+  }
+
+  return `<div class="cache-detail-card">
+    <strong>${index!=null?`${index+1}. `:""}${escapeHtml(cache.name)}</strong><br>
+    ${escapeHtml(cache.id)} · ${escapeHtml(cache.type)}<br>
+    D ${cache.difficulty??"—"} · T ${cache.terrain??"—"}<br>
+    ${cache.corrected?"Final vorhanden ✓":""}
+    ${warning}
+    ${routeEdit}
+    <div class="cache-detail-actions">
+      <button onclick="window.cacheRundeLog('${safeId}','Found it')">Found it</button>
+      <button onclick="window.cacheRundeLog('${safeId}','Didn\\'t find it')">DNF</button>
+      <button onclick="window.cacheRundeLog('${safeId}','Write note')">Notiz</button>
+      <button onclick="window.cacheRundeDone('${safeId}')">${isDone?"Erledigt ✓":"Als erledigt markieren"}</button>
+    </div>
+  </div>`;
+}
+
+window.cacheRundeLog=(cacheId,type)=>{
+  $("#logCacheSelect").value=cacheId;
+  $("#logType").value=type;
+  switchTab("ich");
+  $("#logText")?.focus();
+};
+
+window.cacheRundeDone=(cacheId)=>markCacheCompleted(cacheId);
+
+window.cacheRundeMoveParking=()=>{
+  if(!state.selectedRoute){
+    showToast("Keine Route gewählt.","warn");
+    return;
+  }
+  // For free/map-planned routes, preserve the exact current cache order.
+  const lockSequence=!!state.selectedRoute.manualSelectionLocked ||
+    String(state.selectedRoute.id||"").startsWith("manual-map-");
+  chooseManualParking(state.selectedRoute,lockSequence);
+};
+
+
+
+
+function tripRadiusKm(){
+  const drive=+($("#tripDrive")?.value||25);
+  return Math.max(10,Math.min(50,drive*.8));
+}
+
+function cachesNearTripOrigin(radiusKm=tripRadiusKm()){
+  if(!state.tripOrigin)return [];
+  return state.caches.filter(c=>haversine(state.tripOrigin,c)<=radiusKm);
+}
+
+function updateTripDataStatus(){
+  const text=$("#tripDataText");
+  if(!text)return;
+  if(!state.tripOrigin){
+    text.textContent="Wähle zuerst einen Reise-Ausgangspunkt.";
+    return;
+  }
+  const radius=tripRadiusKm();
+  const nearby=cachesNearTripOrigin(radius);
+  const suitable=nearby.filter(c=>!c.found && c.type!=="Multi" && (c.type!=="Mystery" || c.corrected));
+  text.innerHTML=`Im Umkreis von ca. ${radius.toFixed(0)} km um <strong>${state.tripOrigin.name}</strong>: `+
+    `<strong>${nearby.length}</strong> importierte Caches, davon <strong>${suitable.length}</strong> grundsätzlich geeignet.`;
+}
+
+function showTripAreaOnMap(){
+  if(!state.tripOrigin){alert("Bitte zuerst Reise-Ausgangspunkt wählen.");return;}
+  switchTab("karte");
+  const r=tripRadiusKm();
+  state.layers.route.clearLayers();
+  L.circle([state.tripOrigin.lat,state.tripOrigin.lon],{radius:r*1000,weight:2,dashArray:"8,8",fillOpacity:.05}).addTo(state.layers.route);
+  L.marker([state.tripOrigin.lat,state.tripOrigin.lon],{title:state.tripOrigin.name}).bindPopup(`<strong>${state.tripOrigin.name}</strong><br>Reise-Ausgangspunkt`).addTo(state.layers.route);
+  state.map.setView([state.tripOrigin.lat,state.tripOrigin.lon],Math.max(9,Math.min(13,Math.round(13-Math.log2(r/10)))));
+  $("#mapInfo").innerHTML=`<strong>Reisegebiet: ${state.tripOrigin.name}</strong><span>Planungsradius ca. ${r.toFixed(0)} km</span>`;
+}
+
+function tripImportHint(){
+  if(!state.tripOrigin){alert("Bitte zuerst Reise-Ausgangspunkt wählen.");return;}
+  const prep=+($("#tripPrepRadius")?.value||30);
+  const txt=`Für ${state.tripOrigin.name} solltest du eine GPX-Datei mit Caches im Umkreis von etwa ${prep} km importieren. `+
+    `Je dichter der Import, desto besser kann CacheRunde mehrere unterschiedliche Tagesrunden zusammenstellen. `+
+    `Gefundene Caches werden später automatisch ausgeschlossen; gelöste Mysterys sollten Final-Koordinaten enthalten.`;
+  alert(txt);
+}
+
+
+function debounce(fn,wait=350){
+  let timer=null;
+  return (...args)=>{
+    clearTimeout(timer);
+    timer=setTimeout(()=>fn(...args),wait);
+  };
+}
+
+
+function getSearchReference(){
+  if(state.searchLocation)return Promise.resolve(state.searchLocation);
+  return new Promise(resolve=>{
+    if(!navigator.geolocation){resolve(null);return;}
+    navigator.geolocation.getCurrentPosition(
+      pos=>{
+        state.searchLocation={lat:pos.coords.latitude,lon:pos.coords.longitude,source:"Standort"};
+        resolve(state.searchLocation);
+      },
+      ()=>resolve(null),
+      {enableHighAccuracy:false,timeout:2500,maximumAge:300000}
+    );
+  });
+}
+
+function sortSuggestionsByDistance(items,ref){
+  if(!ref)return items;
+  return items.map(item=>{
+    const d=haversine(ref,{lat:+item.lat,lon:+item.lon});
+    return {...item,distanceKm:d};
+  }).sort((a,b)=>a.distanceKm-b.distanceKm);
+}
+
+async function fetchLocationSuggestions(query){
+  if(!query || query.trim().length<4)return [];
+  try{
+    const ref=await getSearchReference();
+    const params=new URLSearchParams({q:query.trim(),limit:"10"});
+    if(ref){params.set("lat",ref.lat);params.set("lon",ref.lon);}
+    const res=await fetch(`/api/geocode?${params.toString()}`,{cache:"no-store"});
+    if(!res.ok)return [];
+    const data=await res.json();
+    return sortSuggestionsByDistance(data.results||[],ref);
+  }catch(e){
+    return [];
+  }
+}
+
+function renderLocationSuggestions(hostId,items,onPick){
+  const host=$(hostId);
+  if(!host)return;
+  host.innerHTML="";
+  if(!items.length){
+    host.classList.add("hidden");
+    return;
+  }
+  items.slice(0,5).forEach(item=>{
+    const b=document.createElement("button");
+    b.type="button";
+    b.className="search-suggestion";
+    const title=item.name||item.display_name||"Treffer";
+    const detail=item.display_name||"";
+    const distance=Number.isFinite(item.distanceKm)?`${item.distanceKm.toFixed(item.distanceKm<10?1:0)} km entfernt`:"";
+    b.innerHTML=`<strong>${title}</strong>${detail && detail!==title?`<span>${detail}</span>`:""}${distance?`<span>📍 ${distance}</span>`:""}`;
+    b.onclick=()=>{
+      host.classList.add("hidden");
+      onPick(item);
+    };
+    host.appendChild(b);
+  });
+  host.classList.remove("hidden");
+}
+
+const suggestOrigin=debounce(async()=>{
+  const q=$("#originSearch")?.value||"";
+  if(q.trim().length<4){
+    $("#originSuggestions")?.classList.add("hidden");
+    return;
+  }
+  const items=await fetchLocationSuggestions(q);
+  renderLocationSuggestions("#originSuggestions",items,item=>{
+    $("#originSearch").value=item.display_name||item.name||q;
+    setOrigin(+item.lat,+item.lon,item.name||item.display_name||"Gewählter Ort");
+    switchTab("touren");
+  });
+},350);
+
+const suggestTrip=debounce(async()=>{
+  const q=$("#tripSearch")?.value||"";
+  if(q.trim().length<4){
+    $("#tripSuggestions")?.classList.add("hidden");
+    return;
+  }
+  const items=await fetchLocationSuggestions(q);
+  renderLocationSuggestions("#tripSuggestions",items,item=>{
+    $("#tripSearch").value=item.display_name||item.name||q;
+    state.tripOrigin={lat:+item.lat,lon:+item.lon,name:item.name||item.display_name||q};
+    $("#tripOriginStatus").textContent=`Ausgangspunkt: ${state.tripOrigin.name}`;
+    updateTripDataStatus();
+  });
+},350);
+
+async function searchTripOrigin(){
+  const q=$("#tripSearch").value.trim(); if(!q)return;
+  $("#tripOriginStatus").textContent="Suche Ort …";
+  try{
+    const res=await fetch(`/api/geocode?q=${encodeURIComponent(q)}`,{cache:"no-store"});
+    const d=await res.json(),first=d.results?.[0];
+    if(!first){$("#tripOriginStatus").textContent="Kein Ort gefunden.";return;}
+    state.tripOrigin={lat:+first.lat,lon:+first.lon,name:first.name||q};
+    $("#tripOriginStatus").textContent=`Ausgangspunkt: ${state.tripOrigin.name}`;
+    updateTripDataStatus();
+  }catch(e){$("#tripOriginStatus").textContent="Ortssuche fehlgeschlagen.";}
+}
+function routeCacheIds(r){return new Set((r.real?.finalSequence||cacheSequence(r)).map(c=>c.id));}
+function setOverlap(a,b){let n=0;a.forEach(x=>{if(b.has(x))n++});return Math.min(a.size,b.size)?n/Math.min(a.size,b.size):0;}
+
+
+
+function tripDayAnchor(route){
+  if(route.real?.parking)return {lat:route.real.parking.lat,lon:route.real.parking.lon};
+  const seq=route.real?.finalSequence||cacheSequence(route);
+  return seq.length?{lat:seq[0].lat,lon:seq[0].lon}:routeCenter(route);
+}
+function lodgingLabel(type){
+  return {camping:"Campingplatz",camper:"Wohnmobilstellplatz",hotel:"Hotel / Pension",apartment:"Ferienwohnung / Apartment",any:"Unterkunft"}[type]||"Unterkunft";
+}
+function lodgingDistanceScore(lodging,routes){
+  if(!routes?.length)return null;
+  const distances=routes.map(r=>haversine(lodging,tripDayAnchor(r)));
+  const avg=distances.reduce((a,b)=>a+b,0)/distances.length;
+  const max=Math.max(...distances);
+  const qualityWeight=+($("#lodgingQualityWeight")?.value||1);
+  const rating=Number.isFinite(+lodging.rating)?+lodging.rating:null;
+  const reviews=Number.isFinite(+lodging.reviewCount)?+lodging.reviewCount:0;
+  let qualityBonus=0;
+  if(rating!=null){
+    qualityBonus=(rating-3.5)*0.9*qualityWeight;
+    qualityBonus+=Math.min(0.8,Math.log10(reviews+1)*0.18*qualityWeight);
+  }
+  return {avgKm:avg,maxKm:max,score:avg+max*.35-qualityBonus,qualityBonus,rating,reviews};
+}
+
+
+function preferredReviewSource(l){
+  const pref=$("#lodgingReviewSource")?.value||"auto";
+  if(pref!=="auto")return pref;
+  const t=(l.type||"").toLowerCase();
+  if(["camp_site","caravan_site","camping","camper"].includes(t))return "campinginfo";
+  return "googlemaps";
+}
+function reviewSourceLabel(source){
+  return source==="campinginfo"?"camping.info":"Google Maps";
+}
+function lodgingReviewUrl(l){
+  const source=preferredReviewSource(l);
+  const place=`${l.name||"Unterkunft"} ${state.tripOrigin?.name||""}`.trim();
+  if(source==="googlemaps" && l.googleMapsUri)return l.googleMapsUri;
+  if(source==="campinginfo"){
+    return `https://www.google.com/search?q=${encodeURIComponent("site:camping.info "+place)}`;
+  }
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(place)}`;
+}
+
+function lodgingAvailabilityUrl(l){
+  if(l.website)return l.website;
+  const ci=$("#lodgingCheckin")?.value||"";
+  const co=$("#lodgingCheckout")?.value||"";
+  const q=encodeURIComponent(`${l.name||"Unterkunft"} ${state.tripOrigin?.name||""} ${ci} ${co}`);
+  return `https://www.google.com/search?q=${q}`;
+}
+function lodgingRatingText(l){
+  if(Number.isFinite(+l.rating)){
+    const reviews=Number.isFinite(+l.reviewCount)&&+l.reviewCount>0?` · ${l.reviewCount} Bewertungen`:"";
+    const source=l.ratingSource?` · ${l.ratingSource}`:"";
+    return `★ ${(+l.rating).toFixed(1)}${reviews}${source}`;
+  }
+  return state.googlePlaces.enabled && state.googlePlaces.key
+    ? "Kein Google-Place eindeutig zugeordnet"
+    : "Keine Bewertungsquelle verbunden";
+}
+
+async function findLodgingCandidates(){
+  if(!state.tripOrigin){alert("Bitte zuerst Reise-Ausgangspunkt wählen.");return;}
+  const type=$("#lodgingType").value;
+  if(type==="none"){
+    state.lodgingCandidates=[];state.selectedLodging=null;
+    $("#lodgingStatus").textContent="Übernachtung wird nicht berücksichtigt.";
+    $("#lodgingResults").innerHTML="";
+    return;
+  }
+  setProgress(10,"Suche Unterkünfte im Reisegebiet …","Übernachtung");
+  try{
+    const radius=+$("#lodgingRadius").value;
+    const res=await fetch(`/api/lodging?lat=${state.tripOrigin.lat}&lon=${state.tripOrigin.lon}&type=${encodeURIComponent(type)}&radius=${radius*1000}`,{cache:"no-store"});
+    if(!res.ok)throw new Error(await res.text());
+    const d=await res.json();
+    state.lodgingCandidates=(d.results||[]).map(x=>({
+      ...x,
+      lat:+x.lat,lon:+x.lon,
+      rating:x.rating==null?null:+x.rating,
+      reviewCount:x.reviewCount==null?0:+x.reviewCount
+    }));
+    if(state.googlePlaces.enabled && state.googlePlaces.key){
+      setProgress(55,"Lade Google-Bewertungen für Unterkünfte …","Übernachtung");
+      const enriched=[];
+      for(let i=0;i<Math.min(state.lodgingCandidates.length,10);i++){
+        enriched.push(await enrichLodgingWithGoogle(state.lodgingCandidates[i]));
+      }
+      state.lodgingCandidates=[
+        ...enriched,
+        ...state.lodgingCandidates.slice(enriched.length)
+      ];
+    }
+    if(state.currentTripPlan?.routes?.length){
+      state.lodgingCandidates=state.lodgingCandidates.map(x=>({...x,fit:lodgingDistanceScore(x,state.currentTripPlan.routes)})).sort((a,b)=>(a.fit?.score??999)-(b.fit?.score??999));
+    }
+    renderLodgingResults();
+    finishProgress(`${state.lodgingCandidates.length} Unterkunft/-künfte gefunden.`);
+  }catch(e){
+    failProgress(e.message||"Unterkunftssuche fehlgeschlagen");
+  }
+}
+function renderLodgingResults(){
+  const host=$("#lodgingResults"); if(!host)return;
+  host.innerHTML="";
+  if(!state.lodgingCandidates.length){$("#lodgingStatus").textContent="Keine passenden Unterkünfte gefunden.";return;}
+  const withRating=state.lodgingCandidates.filter(x=>Number.isFinite(+x.rating)).length;
+  $("#lodgingStatus").textContent=`${state.lodgingCandidates.length} passende Unterkunft/-künfte gefunden. ${withRating?withRating+" mit direkter Qualitätsangabe.":"Externe Bewertungsquellen können über „Bewertungen ansehen“ geöffnet werden."}`;
+  const list=document.createElement("div");list.className="lodging-list";
+  state.lodgingCandidates.slice(0,10).forEach(l=>{
+    const card=document.createElement("div");
+    card.className="lodging-card"+(state.selectedLodging?.osmId===l.osmId?" selected":"");
+    card.innerHTML=`<strong>${l.name||lodgingLabel(l.type)}</strong>
+      <div class="lodging-meta">${lodgingLabel(l.type)}${l.address?` · ${l.address}`:""}</div>
+      <div class="lodging-rating">${lodgingRatingText(l)}</div>
+      <div class="review-source-note">Bewertungen: ${reviewSourceLabel(preferredReviewSource(l))}</div>
+      ${l.fit?`<div class="lodging-meta">Ø ${l.fit.avgKm.toFixed(1)} km · max. ${l.fit.maxKm.toFixed(1)} km zu den Tagesrunden</div><div class="quality-score">Gesamtscore: ${l.fit.score.toFixed(2)}</div>`:""}
+      <div class="review-actions"><button class="ghost reviews">Bewertungen ansehen</button><button class="ghost availability">Verfügbarkeit prüfen</button></div>
+      <div class="data-actions" style="margin-top:8px"><button class="ghost choose">Auswählen</button><button class="ghost map">Karte</button></div>`;
+    card.querySelector(".choose").onclick=()=>{state.selectedLodging=l;if(state.currentTripPlan)state.currentTripPlan.lodging=l;renderLodgingResults();if(state.currentTripPlan?.routes)renderTripPlan(state.currentTripPlan.routes,state.currentTripPlan.routes.length);};
+    card.querySelector(".map").onclick=()=>{switchTab("karte");state.layers.route.clearLayers();L.marker([l.lat,l.lon]).bindPopup(`<strong>${l.name||lodgingLabel(l.type)}</strong>`).addTo(state.layers.route);state.map.setView([l.lat,l.lon],13);};
+    card.querySelector(".reviews").onclick=()=>window.open(lodgingReviewUrl(l),"_blank","noopener");
+    card.querySelector(".availability").onclick=()=>window.open(lodgingAvailabilityUrl(l),"_blank","noopener");
+    list.appendChild(card);
+  });
+  host.appendChild(list);
+}
+function autoSelectBestLodging(routes){
+  if($("#lodgingType").value==="none"||!state.lodgingCandidates.length)return null;
+  const rated=state.lodgingCandidates.map(x=>({...x,fit:lodgingDistanceScore(x,routes)})).filter(x=>x.fit).sort((a,b)=>a.fit.score-b.fit.score);
+  if(!rated.length)return null;
+  state.lodgingCandidates=rated;state.selectedLodging=rated[0];return rated[0];
+}
+
+function tripRealScore(r,priority="balanced"){
+  const driveMin=(r.real?.drive?.duration||0)/60;
+  const walkMin=r.stats?.totalMin||0;
+  const caches=r.stats?.cacheCount||0;
+  const overlap=(r.real?.overlapRatio||0)*100;
+  let score=caches*4-driveMin*1.6-walkMin*.08-overlap*1.4;
+  if(priority==="caches")score+=caches*4;
+  if(priority==="drive")score-=driveMin*2.5;
+  if(priority==="hike")score-=walkMin*.16;
+  return score;
+}
+
+async function optimizeTripCandidate(route,origin,tripOpts,idx,total){
+  setProgress(20+55*(idx/Math.max(1,total)),
+    `Prüfe Kandidat ${idx+1} von ${total}: ${route.displayName||route.name} …`,
+    "Reiseoptimierung");
+
+  const seq=cacheSequence(route);
+  if(seq.length<2)return null;
+
+  const routeOpts={
+    start:{lat:origin.lat,lon:origin.lon,ele:null},
+    radius:tripOpts.radius,maxGap:15,maxTime:tripOpts.maxWalk,
+    speed:4.5,stopTime:5,excludeFound:true,tradis:true,mysteries:true,multis:false,minCaches:tripOpts.minCaches
+  };
+
+  try{
+    const repaired=await routeAndRepairSequence(seq,routeOpts,null);
+    let finalSeq=repaired.seq;
+    let cacheReal=repaired.result;
+    if(!finalSeq?.length || !cacheReal)return null;
+
+    let parking=null,parkings=[];
+    try{
+      const timeout=new Promise((_,reject)=>setTimeout(()=>reject(new Error("parking-timeout")),9000));
+      parkings=await Promise.race([findParkingCandidates(finalSeq[0],finalSeq[finalSeq.length-1],finalSeq,"fallback"),timeout]);
+      parking=parkings?.[0]||null;
+    }catch(e){}
+
+    if(!parking){
+      parking={...finalSeq[0],name:"Start am ersten Cache",parkingScore:null,fee:"",capacity:0,source:"Fallback"};
+    }
+
+    const parkingPlan=parkings.length
+      ? await optimizeParkingAndEntry(finalSeq,parkings,routeOpts,null,cacheReal,3,false)
+      : null;
+
+    let toFirst,fromLast;
+    let entryCacheId=finalSeq[0]?.id||null;
+    let walkingDirection="vorwärts";
+    let parkingVariantsTested=parkingPlan?.tested||0;
+
+    if(parkingPlan){
+      parking=parkingPlan.parking;
+      finalSeq=parkingPlan.seq;
+      cacheReal=parkingPlan.cacheReal;
+      toFirst=parkingPlan.toFirst;
+      fromLast=parkingPlan.fromLast;
+      entryCacheId=parkingPlan.entryCacheId;
+      walkingDirection=parkingPlan.direction;
+    }else{
+      toFirst=(parking.lat===finalSeq[0].lat && parking.lon===finalSeq[0].lon)
+        ? {distance:0,duration:0,geometry:{coordinates:[[parking.lon,parking.lat]]}}
+        : await footRouteRequest([parking,finalSeq[0]],false);
+      fromLast=await footRouteRequest([finalSeq[finalSeq.length-1],parking],false);
+    }
+
+    const forwardGeometry=mergeGeometries(toFirst.geometry,cacheReal.geometry);
+    const directGeometry=mergeGeometries({coordinates:forwardGeometry},fromLast.geometry);
+    const directOverlap=overlapRatio(directGeometry);
+    let returnMode="direkt";
+
+    if(directOverlap>0.12){
+      const alt=await alternativeReturnRoute(finalSeq[finalSeq.length-1],parking,forwardGeometry);
+      if(alt && alt.overlap<=directOverlap-0.03 && alt.route.distance<=fromLast.distance*1.45){
+        fromLast=alt.route;
+        returnMode="alternativ";
+      }
+    }
+
+    const geometry={type:"LineString",coordinates:mergeGeometries(toFirst.geometry,cacheReal.geometry,fromLast.geometry)};
+    const walkingDistance=(toFirst.distance||0)+(cacheReal.distance||0)+(fromLast.distance||0);
+    const walkingDuration=(toFirst.duration||0)+(cacheReal.duration||0)+(fromLast.duration||0);
+    const totalDuration=walkingDuration+finalSeq.length*5*60;
+
+    let drive=null;
+    try{drive=await carRoute(origin,parking);}catch(e){}
+
+    if(drive && drive.duration>tripOpts.maxDrive*60)return null;
+    if(totalDuration>tripOpts.maxWalk*60*1.05)return null;
+    if(finalSeq.length<tripOpts.minCaches)return null;
+
+    let elevation=null;
+    try{elevation=await fetchElevationForGeometry(geometry.coordinates);}catch(e){}
+
+    route.real={
+      parking,parkingCandidates:parkings.length,parkingAutomatic:parkings.length>0,
+      parkingScore:parking.parkingScore,
+      parkingOptimizationKm:walkingDistance/1000,
+      entryCacheId,
+      walkingDirection,
+      parkingVariantsTested,
+      finalSequence:finalSeq,
+      removedCaches:repaired.removed,
+      cacheDistance:cacheReal.distance,
+      walkingDistance,walkingDuration,totalDuration,
+      maxCacheLegSec:Math.max(0,...cacheReal.legDurations),
+      violations:repaired.violations,
+      drive,geometry,
+      elevation,
+      overlapRatio:overlapRatio(geometry.coordinates),
+      returnMode,
+      checkedAt:new Date().toISOString(),
+      tripOptimized:true
+    };
+    route.stats.km=walkingDistance/1000;
+    route.stats.walkMin=walkingDuration/60;
+    route.stats.totalMin=totalDuration/60;
+    route.stats.cacheCount=finalSeq.length;
+    if(elevation){
+      route.stats.gain=elevation.gain;
+      route.stats.loss=elevation.loss;
+    }
+    route.tripScore=tripRealScore(route,tripOpts.priority);
+    return route;
+  }catch(e){
+    console.warn("Trip candidate failed",e);
+    return null;
+  }
+}
+
+function chooseTripDays(candidates,days){
+  const chosen=[];
+  while(chosen.length<days){
+    let best=null,bestScore=-Infinity;
+    for(const r of candidates){
+      if(chosen.includes(r))continue;
+      const ids=routeCacheIds(r);
+      let cacheOverlap=0;
+      chosen.forEach(c=>cacheOverlap=Math.max(cacheOverlap,setOverlap(ids,routeCacheIds(c))));
+      if(cacheOverlap>.35)continue;
+      const score=(r.tripScore||0)-cacheOverlap*140;
+      if(score>bestScore){bestScore=score;best=r;}
+    }
+    if(!best)break;
+    chosen.push(best);
+  }
+  return chosen;
+}
+
+function tripTotals(routes){
+  return routes.reduce((a,r)=>{
+    a.caches+=(r.stats?.cacheCount||0);
+    a.km+=(r.stats?.km||0);
+    a.walkMin+=(r.stats?.totalMin||0);
+    a.driveMin+=(r.real?.drive?.duration||0)/60;
+    a.gain+=(r.stats?.gain||0);
+    return a;
+  },{caches:0,km:0,walkMin:0,driveMin:0,gain:0});
+}
+
+function saveCurrentTrip(){
+  if(!state.currentTripPlan?.routes?.length){alert("Keine Reise zum Speichern.");return;}
+  const t={
+    id:`trip-${Date.now()}`,
+    name:`${state.currentTripPlan.origin.name} · ${state.currentTripPlan.routes.length} Tage`,
+    origin:state.currentTripPlan.origin,
+    routes:state.currentTripPlan.routes.map(serializableTour),
+    lodging:state.currentTripPlan.lodging||null,
+    totals:tripTotals(state.currentTripPlan.routes),
+    createdAt:new Date().toISOString()
+  };
+  state.savedTrips.unshift(t);
+  persistTourState();
+  renderSavedTrips();
+  showToast("Reise gespeichert.","success");
+}
+
+function renderSavedTrips(){
+  const host=$("#savedTrips");
+  if(!host)return;
+  host.innerHTML="";
+  const q=($("#savedTripSearch")?.value||"").trim().toLowerCase();
+  const mode=$("#savedTripSort")?.value||"recent";
+  let trips=[...state.savedTrips].filter(t=>(t.name||"").toLowerCase().includes(q));
+  trips.sort((a,b)=>{
+    if(mode==="name")return (a.name||"").localeCompare(b.name||"");
+    if(mode==="days")return (b.routes?.length||0)-(a.routes?.length||0);
+    return new Date(b.createdAt||0)-new Date(a.createdAt||0);
+  });
+  if(!trips.length){
+    host.innerHTML='<div class="muted">Keine gespeicherte Reise passend zur Auswahl.</div>';
+    return;
+  }
+  trips.forEach(t=>{
+    const div=document.createElement("div");
+    div.className="saved-trip-card";
+    div.innerHTML=`<strong>${t.name}</strong><br><span class="muted">${t.routes.length} Tage · ${Math.round(t.totals?.caches||0)} Caches · ${(t.totals?.km||0).toFixed(1)} km Wandern · ${fmtMin(t.totals?.driveMin||0)} Anfahrt gesamt${t.lodging?` · ${t.lodging.name||lodgingLabel(t.lodging.type)}`:""}</span>
+      <div class="data-actions" style="margin-top:8px">
+        <button class="ghost load">Öffnen</button>
+        <button class="ghost rename">Umbenennen</button>
+        <button class="ghost copy">Duplizieren</button>
+        <button class="ghost del">Löschen</button>
+      </div>`;
+    div.querySelector(".load").onclick=()=>{
+      state.currentTripPlan={origin:t.origin,routes:t.routes,lodging:t.lodging||null};
+      state.selectedLodging=t.lodging||null;renderTripPlan(t.routes,t.routes.length,true);switchTab("reise");
+    };
+    div.querySelector(".rename").onclick=()=>renameSavedTrip(t);
+    div.querySelector(".copy").onclick=()=>duplicateSavedTrip(t);
+    div.querySelector(".del").onclick=()=>{state.savedTrips=state.savedTrips.filter(x=>x.id!==t.id);persistTourState();renderSavedTrips();};
+    host.appendChild(div);
+  });
+}
+
+function replaceTripDay(index){
+  const plan=state.currentTripPlan;
+  if(!plan)return;
+  const others=plan.routes.filter((_,i)=>i!==index);
+  const current=plan.routes[index];
+  const usedIds=new Set(plan.routes.map(r=>r.id));
+  let best=null,bestScore=-Infinity;
+  for(const cand of state.tripCandidatePool){
+    if(usedIds.has(cand.id))continue;
+    let ov=0;
+    others.forEach(r=>ov=Math.max(ov,setOverlap(routeCacheIds(cand),routeCacheIds(r))));
+    if(ov>.35)continue;
+    const s=(cand.tripScore||0)-ov*140;
+    if(s>bestScore){bestScore=s;best=cand;}
+  }
+  if(!best){alert("Keine passende Alternative mit geringer Überschneidung gefunden.");return;}
+  plan.routes[index]=best;
+  renderTripPlan(plan.routes,plan.routes.length);
+}
+
+async function planMultiDayTrip(){
+  if(!state.tripOrigin){alert("Bitte zuerst Reise-Ausgangspunkt suchen.");return;}
+  const days=+$("#tripDays").value,maxWalk=+$("#tripWalk").value,minCaches=+$("#tripMinCaches").value,maxDrive=+$("#tripDrive").value,priority=$("#tripPriority").value;
+  const mode=$("#tripDataMode").value;
+  updateTripDataStatus();
+
+  if(mode==="prepare"){
+    const prep=+$("#tripPrepRadius").value;
+    const nearby=state.caches.filter(c=>haversine(state.tripOrigin,c)<=prep);
+    const host=$("#tripResults");
+    host.innerHTML=`<div class="card"><strong>Reisegebiet vorbereitet</strong><p>Für <strong>${state.tripOrigin.name}</strong> sind aktuell ${nearby.length} importierte Caches im ${prep}-km-Umkreis vorhanden.</p><p class="muted">Für eine belastbare Mehrtagesplanung sollte dieser Bereich möglichst vollständig als GPX importiert sein.</p></div>`;
+    finishProgress("Reisegebiet vorbereitet.");
+    return;
+  }
+
+  const radius=Math.max(10,Math.min(50,maxDrive*.8));
+  const imported=cachesNearTripOrigin(radius);
+  if(!imported.length){
+    $("#tripResults").innerHTML=`<div class="card"><strong>Keine importierten Caches im Reisegebiet.</strong><p class="muted">Im Planungsradius von ca. ${radius.toFixed(0)} km um ${state.tripOrigin.name} liegen keine Caches aus deinem aktuellen GPX-Bestand.</p></div>`;
+    finishProgress("Keine lokalen Cache-Daten im Reisegebiet.");
+    return;
+  }
+
+  setProgress(8,`Erzeuge Routenkandidaten aus ${imported.length} importierten Caches …`,"Mehrtagestour");
+  const opts={start:{lat:state.tripOrigin.lat,lon:state.tripOrigin.lon,ele:null},radius,maxGap:15,maxTime:maxWalk,speed:4.5,stopTime:5,excludeFound:true,tradis:true,mysteries:true,multis:false,minCaches};
+  let candidates=buildRoutes(opts);
+  await enrichRouteNames(candidates);
+
+  if(!candidates.length){
+    $("#tripResults").innerHTML='<div class="card"><strong>Keine geeigneten Kandidaten gefunden.</strong><p class="muted">Filter lockern oder mehr Anfahrt/Wanderzeit zulassen.</p></div>';
+    finishProgress("Keine Kandidaten.");
+    return;
+  }
+
+  const depth=Math.min(+$("#tripOptimizeDepth").value||6,candidates.length);
+  const preselected=[...candidates].sort((a,b)=>{
+    let sa=(a.stats.cacheCount||0)*3-(a.startDistance||0)*2-(a.stats.km||0)*.2;
+    let sb=(b.stats.cacheCount||0)*3-(b.startDistance||0)*2-(b.stats.km||0)*.2;
+    if(priority==="caches"){sa+=(a.stats.cacheCount||0)*3;sb+=(b.stats.cacheCount||0)*3;}
+    if(priority==="drive"){sa-=(a.startDistance||0)*3;sb-=(b.startDistance||0)*3;}
+    if(priority==="hike"){sa-=(a.stats.km||0);sb-=(b.stats.km||0);}
+    return sb-sa;
+  }).slice(0,depth);
+
+  setProgress(18,`${preselected.length} Kandidaten werden real geprüft …`,"Reiseoptimierung");
+  const optimized=[];
+  const tripOpts={maxWalk,maxDrive,minCaches,radius,priority};
+  for(let i=0;i<preselected.length;i++){
+    const r=await optimizeTripCandidate(preselected[i],state.tripOrigin,tripOpts,i,preselected.length);
+    if(r)optimized.push(r);
+    await sleep(350);
+  }
+
+  if(!optimized.length){
+    $("#tripResults").innerHTML='<div class="card"><strong>Keine real geprüfte Tagesrunde erfüllt die Vorgaben.</strong><p class="muted">Die echte Fahrzeit, Wanderzeit oder Mindestzahl Caches war bei allen Kandidaten außerhalb deiner Grenzen.</p></div>';
+    failProgress("Keine Tagesrunde bestand die reale Prüfung.");
+    return;
+  }
+
+  state.tripCandidatePool=optimized;
+  const chosen=chooseTripDays(optimized,days);
+  state.currentTripPlan={origin:{...state.tripOrigin},routes:chosen,createdAt:new Date().toISOString()};
+  if($("#lodgingType").value!=="none" && state.lodgingCandidates.length){
+    const best=autoSelectBestLodging(chosen);
+    if(best)state.currentTripPlan.lodging=best;
+  }
+  setProgress(92,"Stelle optimierte Reise zusammen …","Reiseoptimierung");
+  renderTripPlan(chosen,days);
+  finishProgress(`${chosen.length} von ${days} Tagen real optimiert.`);
+}
+
+function renderTripPlan(routes,days,loaded=false){
+  const host=$("#tripResults");host.innerHTML="";
+  if(!routes?.length){
+    host.innerHTML='<div class="card"><strong>Keine geeigneten Tagesrunden gefunden.</strong></div>';
+    return;
+  }
+
+  const totals=tripTotals(routes);
+  const ov=routes.reduce((max,r)=>Math.max(max,(r.real?.overlapRatio||0)*100),0);
+
+  const overview=document.createElement("div");
+  overview.className="card trip-overview";
+  overview.innerHTML=`<div class="section-head"><div><span class="eyebrow">REISEPLAN</span><h2 style="margin:4px 0">${state.currentTripPlan?.origin?.name||state.tripOrigin?.name||"Cache-Reise"} · ${routes.length} Tage</h2></div><button id="saveWholeTrip" class="primary">Reise speichern</button></div>
+    <div class="profile-grid">
+      <div><strong>${totals.caches}</strong><span>Cache-Slots</span></div>
+      <div><strong>${totals.km.toFixed(1)} km</strong><span>Wandern gesamt</span></div>
+      <div><strong>${fmtMin(totals.driveMin)}</strong><span>Anfahrt gesamt</span></div>
+      <div><strong>↑ ${Math.round(totals.gain)} m</strong><span>Höhenmeter</span></div>
+    </div>
+    <p class="muted">Alle Tagesrunden wurden mit echter Fahrzeit und echtem Fußrouting geprüft. Größter Doppelweg-Anteil innerhalb eines Tages: ${Math.round(ov)} %.</p>${state.currentTripPlan?.lodging?`<div class="trip-lodging-summary"><strong>Übernachtung: ${state.currentTripPlan.lodging.name||lodgingLabel(state.currentTripPlan.lodging.type)}</strong><br>${state.currentTripPlan.lodging.fit?`Ø ${state.currentTripPlan.lodging.fit.avgKm.toFixed(1)} km · max. ${state.currentTripPlan.lodging.fit.maxKm.toFixed(1)} km zu den Tagesrunden`:""}</div>`:""}`;
+  host.appendChild(overview);
+  $("#saveWholeTrip").onclick=saveCurrentTrip;
+
+  routes.forEach((r,i)=>{
+    const driveMin=(r.real?.drive?.duration||0)/60;
+    const card=document.createElement("article");
+    card.className="card route-card";
+    card.innerHTML=`<div class="route-head"><div><span class="rank">TAG ${i+1}</span><h3>${r.displayName||r.name}</h3></div><span class="pill">${r.stats.cacheCount} Caches</span></div>
+      <div class="route-metrics">
+        <div class="metric"><strong>${r.stats.km.toFixed(1)} km</strong><span>Echte Wanderstrecke</span></div>
+        <div class="metric"><strong>${fmtMin(r.stats.totalMin)}</strong><span>Wanderzeit inkl. Cachezeit</span></div>
+        <div class="metric"><strong>${r.real?.drive?fmtMin(driveMin):"—"}</strong><span>Echte Anfahrt</span></div>
+        <div class="metric"><strong>↑ ${Math.round(r.stats.gain||0)} m</strong><span>Höhenmeter</span></div>
+      </div>
+      <div class="trip-day-real"><strong>🅿 ${r.real?.parking?.name||"Startpunkt"}</strong><br>
+        Doppelweg: ${Math.round((r.real?.overlapRatio||0)*100)} % · Rückweg: ${r.real?.returnMode==="alternativ"?"Alternative":"direkt"}<br>
+        Max. Cache→Cache: ${fmtMin((r.real?.maxCacheLegSec||0)/60)}${r.real?.removedCaches?.length?` · Auto-Reparatur: ${r.real.removedCaches.length} Cache(s) entfernt`:""}
+      </div>
+      <div class="trip-day-actions">
+        <button class="ghost map">Karte</button>
+        <button class="ghost save">Tour speichern</button>
+        <button class="ghost alt">Alternative</button>
+        <button class="primary start">Starten</button>
+      </div>`;
+    card.querySelector(".map").onclick=()=>showRouteOnMap(r);
+    card.querySelector(".save").onclick=()=>saveTour(r);
+    card.querySelector(".alt").onclick=()=>replaceTripDay(i);
+    card.querySelector(".start").onclick=()=>startTour(r);
+    host.appendChild(card);
+  });
+
+  if(routes.length<days){
+    host.insertAdjacentHTML("beforeend",`<div class="card"><strong>Nur ${routes.length} unterschiedliche Tage erfüllen die realen Vorgaben.</strong><p class="muted">Weitere geprüfte Kandidaten überschneiden sich zu stark oder liegen außerhalb der Fahr-/Wanderzeit.</p></div>`);
+  }
+}
+
+
+function loadGooglePlacesSettings(){
+  try{
+    const cfg=JSON.parse(localStorage.getItem("cacherunde-google-places")||"{}");
+    state.googlePlaces={enabled:!!cfg.enabled,key:cfg.key||""};
+    if($("#googlePlacesKey"))$("#googlePlacesKey").value=state.googlePlaces.key;
+    if($("#googleRatingsEnabled"))$("#googleRatingsEnabled").checked=state.googlePlaces.enabled;
+    updateGooglePlacesStatus();
+  }catch(e){}
+}
+
+function saveGooglePlacesSettings(){
+  state.googlePlaces={
+    enabled:$("#googleRatingsEnabled")?.checked||false,
+    key:$("#googlePlacesKey")?.value.trim()||""
+  };
+  localStorage.setItem("cacherunde-google-places",JSON.stringify(state.googlePlaces));
+  updateGooglePlacesStatus();
+}
+
+function updateGooglePlacesStatus(text=null){
+  const el=$("#googlePlacesStatus");
+  if(!el)return;
+  if(text){el.textContent=text;return;}
+  if(!state.googlePlaces.key){
+    el.textContent="Nicht konfiguriert. Ohne Key bleibt „Bewertungen ansehen“ als externer Link verfügbar.";
+  }else if(state.googlePlaces.enabled){
+    el.textContent="Google Ratings Provider aktiviert.";
+  }else{
+    el.textContent="API-Key gespeichert, direkte Google-Bewertungen aber deaktiviert.";
+  }
+}
+
+async function testGooglePlacesConnection(){
+  saveGooglePlacesSettings();
+  if(!state.googlePlaces.key){updateGooglePlacesStatus("Bitte zuerst einen API-Key eintragen.");return;}
+  setProgress(20,"Teste Google Places Provider …","Google Places");
+  try{
+    const res=await fetch("/api/google-places-test",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({key:state.googlePlaces.key})
+    });
+    const d=await res.json();
+    if(!res.ok||!d.ok)throw new Error(d.message||"Test fehlgeschlagen");
+    updateGooglePlacesStatus("Verbindung erfolgreich. Google Ratings Provider ist einsatzbereit.");
+    finishProgress("Google Places Verbindung erfolgreich.");
+  }catch(e){
+    updateGooglePlacesStatus(`Verbindung fehlgeschlagen: ${e.message}`);
+    failProgress(e.message);
+  }
+}
+
+async function enrichLodgingWithGoogle(l){
+  if(!state.googlePlaces.enabled || !state.googlePlaces.key)return l;
+  try{
+    const res=await fetch("/api/google-place-rating",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        key:state.googlePlaces.key,
+        name:l.name||"",
+        lat:l.lat,
+        lon:l.lon
+      })
+    });
+    if(!res.ok)return l;
+    const d=await res.json();
+    if(!d.matched)return l;
+    return {
+      ...l,
+      rating:d.rating==null?l.rating:+d.rating,
+      reviewCount:d.userRatingCount==null?l.reviewCount:+d.userRatingCount,
+      googlePlaceId:d.placeId||null,
+      googleMapsUri:d.googleMapsUri||null,
+      ratingSource:"Google"
+    };
+  }catch(e){
+    return l;
+  }
+}
+
+function loadProfile(){
+  try{
+    const p=JSON.parse(localStorage.getItem("cacherunde-profile")||"{}");
+    state.profile={
+      gcUsername:p.gcUsername||"Knorbert",
+      csUsername:p.csUsername||p.gcUsername||"Knorbert",
+      profileUrl:p.profileUrl||"https://www.geocaching.com/p/default.aspx?guid=363b1243-156e-4600-ade9-81c58d8b57b4",
+      knownGermanyRank:p.knownGermanyRank!=null ? +p.knownGermanyRank : 52364
+    };
+    $("#gcUsername").value=state.profile.gcUsername;
+    $("#csUsername").value=state.profile.csUsername;
+    $("#gcProfileUrl").value=state.profile.profileUrl;
+    $("#knownGermanyRank").value=state.profile.knownGermanyRank||"";
+    $("#accountStatus").textContent=state.profile.gcUsername?`Profil: ${state.profile.gcUsername}`:"Noch kein persönliches Profil gespeichert.";
+  }catch(e){}
+}
+
+function saveProfile(){
+  state.profile={
+    gcUsername:$("#gcUsername").value.trim(),
+    csUsername:$("#csUsername").value.trim()||$("#gcUsername").value.trim(),
+    profileUrl:$("#gcProfileUrl")?.value.trim()||"",
+    knownGermanyRank:$("#knownGermanyRank")?.value ? +$("#knownGermanyRank").value : null
+  };
+  localStorage.setItem("cacherunde-profile",JSON.stringify(state.profile));
+  $("#accountStatus").textContent=state.profile.gcUsername?`Profil gespeichert: ${state.profile.gcUsername}`:"Profil gespeichert.";
+  refreshPersonalStats();
+}
+
+async function resolveGeocachingProfile(){
+  const url=$("#gcProfileUrl")?.value.trim();
+  if(!url){
+    showToast("Bitte zuerst die Geocaching-Profil-URL eintragen.","warn");
+    return;
+  }
+  setProgress(20,"Lese öffentlichen Profilnamen …","Geocaching-Profil");
+  try{
+    const res=await fetch(`/api/geocaching-profile-public?url=${encodeURIComponent(url)}`,{cache:"no-store"});
+    const d=await res.json();
+    if(!res.ok || !d.name)throw new Error(d.message||"Profilname nicht erkannt");
+    $("#gcUsername").value=d.name;
+    if(!$("#csUsername").value.trim())$("#csUsername").value=d.name;
+    state.profile.gcUsername=d.name;
+    state.profile.csUsername=$("#csUsername").value.trim()||d.name;
+    state.profile.profileUrl=url;
+    localStorage.setItem("cacherunde-profile",JSON.stringify(state.profile));
+    showToast(`Geocaching-Profil erkannt: ${d.name}`,"success");
+    finishProgress(`Profilname erkannt: ${d.name}`);
+  }catch(e){
+    failProgress(e.message);
+    showToast(`Profilname konnte nicht erkannt werden: ${e.message}`,"error",5000);
+  }
+}
+
+function localFindStats(){
+  const username=(state.profile.gcUsername||"").trim().toLowerCase();
+  const currentYear=new Date().getFullYear();
+  const foundIds=new Set(), monthly=new Map(), yearly=new Map();
+  const types={Traditional:0,Mystery:0,Multi:0,Other:0};
+  let lastFindDate=null;
+
+  state.caches.forEach(c=>{
+    let ownFound=false, ownDate=null;
+    if(username && Array.isArray(c.logs)){
+      const ownLogs=c.logs
+        .filter(l=>(l.finder||"").trim().toLowerCase()===username && /found it/i.test(l.type||""))
+        .map(l=>({...l,_date:l.date?new Date(l.date):null}))
+        .filter(l=>!l._date || Number.isFinite(l._date.getTime()))
+        .sort((a,b)=>(b._date?.getTime()||0)-(a._date?.getTime()||0));
+      if(ownLogs.length){ownFound=true;ownDate=ownLogs[0]._date||null;}
+    }else if(!username && c.found){ownFound=true;}
+    if(!ownFound || foundIds.has(c.id))return;
+    foundIds.add(c.id);
+    if(types[c.type]!=null)types[c.type]++;else types.Other++;
+    if(ownDate){
+      if(!lastFindDate || ownDate>lastFindDate)lastFindDate=ownDate;
+      const y=ownDate.getFullYear();
+      yearly.set(y,(yearly.get(y)||0)+1);
+      const mk=`${y}-${String(ownDate.getMonth()+1).padStart(2,"0")}`;
+      monthly.set(mk,(monthly.get(mk)||0)+1);
+    }
+  });
+
+  const monthlyRows=[...monthly.entries()].sort((a,b)=>a[0].localeCompare(b[0])).slice(-12).map(([month,count])=>({month,count}));
+  const yearlyRows=[...yearly.entries()].sort((a,b)=>a[0]-b[0]).map(([year,count])=>({year:+year,count:+count}));
+  const year=yearly.get(currentYear)||0;
+  return {total:foundIds.size,year,types,lastFindDate,activeMonths:monthly.size,monthly:monthlyRows,yearly:yearlyRows};
+}
+
+function summarizeYearlyStats(rows,currentYear=new Date().getFullYear()){
+  const r=(rows||[]).map(x=>({year:+x.year,count:+x.count||0}))
+    .filter(x=>Number.isFinite(x.year)&&Number.isFinite(x.count)&&x.count>=0);
+  const current=r.find(x=>x.year===currentYear)?.count||0;
+  const past=r.filter(x=>x.year<currentYear);
+  const previousBest=past.length?past.reduce((a,b)=>b.count>a.count?b:a):null;
+  const bestOverall=r.length?r.reduce((a,b)=>b.count>a.count?b:a):null;
+  const toRecord=previousBest?Math.max(0,previousBest.count-current+1):0;
+  return {current,previousBest,bestOverall,toRecord,newRecord:!!previousBest&&current>previousBest.count};
+}
+
+/* ---- Jahresstatistik: Quellen (seit 0.12.1) ----
+   1. geocaching.com Statistikseite über die eigene, angemeldete Browsersitzung
+   2. importierte "My Finds"-Pocket-Query (lokal gespeichert)
+   3. eigene Found-Logs im normalen GPX-Import */
+
+async function fetchGcStats(profileUrl,force=false){
+  if(!profileUrl)return null;
+  try{
+    const res=await fetch(`/api/gc-stats?url=${encodeURIComponent(profileUrl)}&force=${force?"1":"0"}`,{cache:"no-store"});
+    let data=null;
+    try{data=await res.json();}catch(e){}
+    return data||{available:false,yearly:[],message:`HTTP ${res.status}`};
+  }catch(e){
+    return {available:false,yearly:[],message:e.message||String(e)};
+  }
+}
+
+async function gcLogin(){
+  const url=state.profile.profileUrl||$("#gcProfileUrl")?.value?.trim()||"";
+  try{
+    const res=await fetch(`/api/gc-login?url=${encodeURIComponent(url)}`,{cache:"no-store"});
+    const d=await res.json();
+    if(!d.ok)throw new Error(d.message||`HTTP ${res.status}`);
+    showToast("Anmeldefenster geöffnet. Bitte dort bei geocaching.com anmelden, das Fenster danach schließen und dann „Jahreswerte neu prüfen“ klicken.","success",10000);
+    const src=$("#yearStatsSource");
+    if(src)src.innerHTML="<strong>Anmeldung läuft</strong> · Nach dem Login das separate Browserfenster schließen und „Jahreswerte neu prüfen“ klicken.";
+  }catch(e){
+    showToast(`Anmeldefenster konnte nicht geöffnet werden: ${e.message}`,"error",6000);
+  }
+}
+
+function parseMyFindsGpx(text,username){
+  const doc=new DOMParser().parseFromString(text,"application/xml");
+  if(doc.getElementsByTagName("parsererror").length)throw new Error("Die Datei ist kein gültiges GPX.");
+  const user=(username||"").trim().toLowerCase();
+  const FOUND=/^(found it|attended|webcam photo taken)$/i;
+  const yearly=new Map();
+  let total=0,lastDate=null,firstDate=null,withLogs=0,skipped=0;
+  for(const w of doc.getElementsByTagNameNS("*","wpt")){
+    const logs=[...w.getElementsByTagNameNS("*","log")];
+    if(!logs.length)continue;
+    withLogs++;
+    const dates=logs.filter(l=>{
+      const type=l.getElementsByTagNameNS("*","type")[0]?.textContent?.trim()||"";
+      const finder=(l.getElementsByTagNameNS("*","finder")[0]?.textContent||"").trim().toLowerCase();
+      return FOUND.test(type)&&(!user||finder===user);
+    }).map(l=>(l.getElementsByTagNameNS("*","date")[0]?.textContent||"").trim()).filter(d=>/^\d{4}-/.test(d)).sort();
+    if(!dates.length){skipped++;continue;}
+    const d=dates[0]; // erster eigener Fund dieses Caches
+    const y=+d.slice(0,4);
+    yearly.set(y,(yearly.get(y)||0)+1);
+    total++;
+    if(!lastDate||d>lastDate)lastDate=d;
+    if(!firstDate||d<firstDate)firstDate=d;
+  }
+  if(!withLogs)throw new Error("Keine Caches mit Logs gefunden. Ist das die „My Finds“-Pocket-Query?");
+  if(!total)throw new Error(`Keine Found-Logs von „${username}“ gefunden. Stimmt der Geocaching-Benutzername im Profil?`);
+  return {
+    total,
+    skipped,
+    firstDate:firstDate?.slice(0,10)||null,
+    lastDate:lastDate?.slice(0,10)||null,
+    yearly:[...yearly.entries()].sort((a,b)=>a[0]-b[0]).map(([year,count])=>({year,count}))
+  };
+}
+
+function loadMyFinds(){
+  try{return JSON.parse(localStorage.getItem("cacherunde-myfinds")||"null");}catch(e){return null;}
+}
+
+function updateMyFindsStatus(){
+  const el=$("#myFindsStatus");
+  if(!el)return;
+  const m=loadMyFinds();
+  el.textContent=m
+    ? `My Finds: ${m.total} Funde bis ${new Date(m.lastDate).toLocaleDateString("de-DE")} (importiert am ${new Date(m.importedAt).toLocaleDateString("de-DE")}).`
+    : "Noch keine „My Finds“-Pocket-Query importiert.";
+}
+
+async function importMyFinds(file){
+  try{
+    const text=await file.text();
+    const username=state.profile.gcUsername||$("#gcUsername")?.value?.trim()||"";
+    const r=parseMyFindsGpx(text,username);
+    const data={...r,fileName:file.name,importedAt:new Date().toISOString()};
+    localStorage.setItem("cacherunde-myfinds",JSON.stringify(data));
+    updateMyFindsStatus();
+    showToast(`My Finds importiert: ${r.total} Funde (${r.yearly.length} Jahre).`,"success",6000);
+    refreshPersonalStats();
+  }catch(e){
+    showToast(`My Finds konnte nicht gelesen werden: ${e.message}`,"error",7000);
+  }
+}
+
+function clearMyFinds(){
+  if(!loadMyFinds())return;
+  if(!confirm("Importierte „My Finds“-Daten löschen?"))return;
+  localStorage.removeItem("cacherunde-myfinds");
+  updateMyFindsStatus();
+  refreshPersonalStats();
+}
+
+async function resolveYearStats(local,force=false){
+  const gc=await fetchGcStats(state.profile.profileUrl,force);
+  if(gc?.yearly?.length){
+    return {
+      yearly:gc.yearly,
+      totalFinds:gc.totalFinds??null,
+      source:gc.cached?"geocaching.com (Zwischenspeicher)":"geocaching.com",
+      message:gc.message||`${gc.yearly.length} Jahre aus deiner Profilstatistik.`,
+      detail:gc
+    };
+  }
+
+  const myFinds=loadMyFinds();
+  if(myFinds?.yearly?.length){
+    const why=gc?.message?`${gc.message} `:"";
+    return {
+      yearly:myFinds.yearly,
+      totalFinds:myFinds.total,
+      source:"My Finds GPX",
+      message:`${why}Stand ${new Date(myFinds.lastDate).toLocaleDateString("de-DE")} · ohne Adventure Labs.`,
+      detail:{gc,myFinds}
+    };
+  }
+
+  if(local?.yearly?.length){
+    return {
+      yearly:local.yearly,
+      totalFinds:local.total,
+      source:"GPX Found-Logs",
+      message:`${gc?.message?gc.message+" ":""}Verwende ${local.yearly.length} Jahr(e) aus eigenen Found-Logs im normalen GPX (meist unvollständig).`,
+      detail:{gc}
+    };
+  }
+
+  return {
+    yearly:[],
+    totalFinds:null,
+    source:"keine",
+    message:gc?.message||"Keine Jahresdaten. Bei geocaching.com anmelden oder die „My Finds“-Pocket-Query importieren.",
+    detail:{gc}
+  };
+}
+
+function openProjectGcStats(){
+  const username=(state.profile.gcUsername||state.profile.csUsername||"").trim();
+  if(!username){
+    showToast("Bitte zuerst den Geocaching-Benutzernamen speichern.","warn");
+    return;
+  }
+  window.open(`https://project-gc.com/ProfileStats/${encodeURIComponent(username)}`,"_blank","noopener");
+}
+
+async function testYearStats(){
+  const btn=$("#testYearStats");
+  if(btn)btn.disabled=true;
+  setProgress(10,"Rufe Statistik von geocaching.com ab …","Jahresstatistik");
+  try{
+    const local=localFindStats();
+    const resolved=await resolveYearStats(local,true);
+    renderLocalStats(local,resolved);
+    const ys=summarizeYearlyStats(resolved.yearly||[]);
+    if(resolved.yearly?.length){
+      finishProgress(`Jahresstatistik geladen: ${resolved.source}.`);
+      showToast(
+        `${resolved.source}: ${ys.current} Funde ${new Date().getFullYear()} · bestes Jahr ${ys.bestOverall?.year??"—"} mit ${ys.bestOverall?.count??"—"} Funden.`,
+        "success",6500
+      );
+    }else{
+      failProgress(resolved.message||"Keine Jahresdaten");
+      showToast(`Jahresstatistik: ${resolved.message}`,"warn",7500);
+    }
+  }finally{
+    if(btn)btn.disabled=false;
+  }
+}
+
+function loadManualStats(){
+  try{
+    state.manualStats=JSON.parse(localStorage.getItem("cacherunde-manual-stats")||"{}");
+  }catch(e){
+    state.manualStats={};
+  }
+  const m=state.manualStats||{};
+  const set=(id,v)=>{const el=$("#"+id);if(el)el.value=v??"";};
+  set("manualTotalFinds",m.totalFinds);
+  set("manualYearFinds",m.yearFinds);
+  set("manualWorldRank",m.worldRank);
+  set("manualEuropeRank",m.europeRank);
+  set("manualGermanyRank",m.germanyRank);
+  set("manualStatsDate",m.date);
+}
+
+function saveManualStats(){
+  const num=id=>{
+    const v=$("#"+id)?.value;
+    return v===""||v==null?null:+v;
+  };
+  state.manualStats={
+    totalFinds:num("manualTotalFinds"),
+    yearFinds:num("manualYearFinds"),
+    worldRank:num("manualWorldRank"),
+    europeRank:num("manualEuropeRank"),
+    germanyRank:num("manualGermanyRank"),
+    date:$("#manualStatsDate")?.value||new Date().toISOString().slice(0,10)
+  };
+  localStorage.setItem("cacherunde-manual-stats",JSON.stringify(state.manualStats));
+  refreshPersonalStats();
+  showToast("Manuelle Statistikwerte gespeichert.","success");
+}
+
+function clearManualStats(){
+  if(!confirm("Manuell gespeicherte Statistik- und Rankingwerte löschen?"))return;
+  state.manualStats={};
+  localStorage.removeItem("cacherunde-manual-stats");
+  loadManualStats();
+  refreshPersonalStats();
+}
+
+function renderMonthlyFinds(local){
+  const host=$("#statsMonthly");
+  if(!host)return;
+  const rows=local.monthly||[];
+  if(!rows.length){
+    host.innerHTML='<div class="muted">Im importierten GPX sind keine datierten eigenen Found-Logs vorhanden.</div>';
+    return;
+  }
+  const max=Math.max(1,...rows.map(r=>r.count));
+  host.innerHTML=rows.map(r=>{
+    const h=Math.max(4,Math.round(r.count/max*60));
+    const label=r.month.slice(5)+"/"+r.month.slice(2,4);
+    return `<div class="stats-month-bar" title="${r.month}: ${r.count} Funde">
+      <strong>${r.count}</strong>
+      <div class="bar" style="height:${h}px"></div>
+      <span>${label}</span>
+    </div>`;
+  }).join("");
+}
+
+function renderLocalStats(local,yearStats=null){
+  const set=(id,v)=>{const el=$("#"+id);if(el)el.textContent=v;};
+  set("statImportedOwnFinds",local.total);
+  set("statTraditionalFinds",local.types?.Traditional||0);
+  set("statMysteryFinds",local.types?.Mystery||0);
+  set("statMultiFinds",local.types?.Multi||0);
+  set("statLastFind",local.lastFindDate?local.lastFindDate.toLocaleDateString("de-DE"):"—");
+  set("statActiveMonths",local.activeMonths||0);
+  renderMonthlyFinds(local);
+
+  const rows=yearStats?.yearly?.length?yearStats.yearly:local.yearly;
+  const ys=summarizeYearlyStats(rows);
+  set("statThisYearDetailed",rows?.length?ys.current:"—");
+  set("statBestYear",ys.bestOverall?`${ys.bestOverall.year} · ${ys.bestOverall.count}`:"—");
+  set("statToNewRecord",ys.previousBest?(ys.toRecord===0?"0 · Rekord!":ys.toRecord):"—");
+
+  const src=$("#yearStatsSource");
+  if(src){
+    const source=yearStats?.source||"keine";
+    const msg=yearStats?.message||"Keine auswertbaren Jahresdaten gefunden.";
+    src.innerHTML=`<strong>Quelle: ${escapeHtml(source)}</strong> · ${escapeHtml(msg)}`;
+  }
+}
+
+function effectiveStat(autoValue,manualValue){
+  return autoValue!=null && autoValue!=="" ? autoValue : (manualValue!=null ? manualValue : null);
+}
+
+function setCacherstatsLiveStatus(text,kind=""){
+  const el=$("#cacherstatsLiveStatus");
+  if(!el)return;
+  el.textContent=text;
+  el.className=`muted ${kind?`provider-status-${kind}`:""}`;
+}
+
+async function fetchCacherstatsRanks(username,force=false){
+  if(!username)return null;
+  const knownGermanyRank=state.profile.knownGermanyRank||($("#knownGermanyRank")?.value?+$("#knownGermanyRank").value:null);
+  const rankParam=knownGermanyRank?`&germanyRankHint=${encodeURIComponent(knownGermanyRank)}`:"";
+  const profileUrl=state.profile.profileUrl||$("#gcProfileUrl")?.value?.trim()||"";
+  const profileParam=profileUrl?`&profileUrl=${encodeURIComponent(profileUrl)}`:"";
+  const res=await fetch(`/api/cacherstats?user=${encodeURIComponent(username)}&force=${force?"1":"0"}${rankParam}${profileParam}`,{cache:"no-store"});
+  let data=null;
+  try{data=await res.json();}catch(e){}
+  if(!res.ok){
+    if(data?.message)throw new Error(data.message);
+    throw new Error(`Cacherstats HTTP ${res.status}`);
+  }
+  return data;
+}
+
+async function testCacherstatsLive(){
+  const username=($("#csUsername")?.value||state.profile.csUsername||"").trim();
+  if(!username){
+    setCacherstatsLiveStatus("Bitte zuerst einen Cacherstats-Benutzernamen eintragen.","warn");
+    return;
+  }
+  setCacherstatsLiveStatus("Teste Cacherstats Live …");
+  setProgress(20,"Teste direkten Zugriff und Browser-Fallback …","Cacherstats");
+  try{
+    const r=await fetchCacherstatsRanks(username,true);
+    if(r?.matched){
+      const source=r.cached
+        ? `lokaler Cache${r.cacheAgeDays!=null?` · ${r.cacheAgeDays} Tag(e) alt`:""}`
+        : (r.sourceMethod||"Live");
+      const hint=r.directLookup
+        ? ` · Direct Lookup${r.lookupKey?` (${r.lookupKey})`:""}`
+        : (r.usedRankHint?" · Rang-Fallback verwendet":"");
+      setCacherstatsLiveStatus(
+        `Treffer: ${r.name||username} · Quelle: ${source}${hint} · Funde ${r.finds??"—"} · Welt ${r.worldRank?`#${r.worldRank}`:"—"} · Europa ${r.europeRank?`#${r.europeRank}`:"—"} · Deutschland ${r.germanyRank?`#${r.germanyRank}`:"—"}`,
+        r.cached?"warn":"good"
+      );
+      finishProgress("Cacherstats Live funktioniert.");
+    }else if(r?.blocked){
+      setCacherstatsLiveStatus(`Cacherstats blockiert die automatische Abfrage${r.message?`: ${r.message}`:""}.`,"bad");
+      failProgress("Cacherstats blockiert die Abfrage.");
+    }else{
+      setCacherstatsLiveStatus(`Kein exakter Treffer für „${username}“.`,"warn");
+      finishProgress("Cacherstats erreichbar, aber kein exakter Treffer.");
+    }
+  }catch(e){
+    setCacherstatsLiveStatus(`Cacherstats-Test fehlgeschlagen: ${e.message}`,"bad");
+    failProgress(e.message);
+  }
+}
+
+function openCacherstatsBrowser(){
+  const username=($("#csUsername")?.value||state.profile.csUsername||"").trim();
+  const base="https://www.cacherstats.com/cgi-bin/RankingList.pl?Lang=EN&Loc=Germany&ROW=1";
+  const q=username?`&Name=${encodeURIComponent(username)}`:"";
+  window.open(base+q,"_blank","noopener");
+}
+
+async function refreshPersonalStats(){
+  setProgress(10,"Berechne lokale Fundstatistik …","Persönliche Statistik");
+  const local=localFindStats();
+  const yearStats=await resolveYearStats(local,false);
+  renderLocalStats(local,yearStats);
+
+  setProgress(45,"Suche Cacherstats-Ranking …","Persönliche Statistik");
+  let ranks=null;
+  try{
+    ranks=await fetchCacherstatsRanks(state.profile.csUsername,false);
+  }catch(e){
+    ranks={matched:false,blocked:false,message:e.message};
+  }
+  const manual=state.manualStats||{};
+
+  const totalFinds=effectiveStat(ranks?.finds, effectiveStat(manual.totalFinds, local.total));
+  const resolvedYearSummary=summarizeYearlyStats(yearStats?.yearly||[]);
+  const resolvedCurrentYear=yearStats?.yearly?.length?resolvedYearSummary.current:null;
+  const yearFinds=effectiveStat(resolvedCurrentYear,effectiveStat(manual.yearFinds, local.year));
+  const worldRank=effectiveStat(ranks?.worldRank,manual.worldRank);
+  const europeRank=effectiveStat(ranks?.europeRank,manual.europeRank);
+  const germanyRank=effectiveStat(
+    ranks?.germanyRank,
+    effectiveStat(manual.germanyRank,state.profile.knownGermanyRank)
+  );
+
+  $("#statTotalFinds").textContent=totalFinds!=null?String(totalFinds):"—";
+  $("#statYearFinds").textContent=yearFinds!=null?String(yearFinds):"—";
+  $("#statWorldRank").textContent=worldRank?`#${worldRank}`:"—";
+  $("#statEuropeRank").textContent=europeRank?`#${europeRank}`:"—";
+  $("#statGermanyRank").textContent=germanyRank?`#${germanyRank}`:"—";
+
+  const localNote=state.profile.gcUsername
+    ? `GPX: ${local.total} eigene Funde im aktuell importierten Datenbestand erkannt, davon ${local.year??0} in ${new Date().getFullYear()}.`
+    : `GPX: ${local.total} als gefunden markierte Caches im aktuellen Import.`;
+
+  let sourceText="";
+  if(ranks?.matched){
+    const where=[
+      ranks.worldRank?`Weltweit #${ranks.worldRank}`:null,
+      ranks.europeRank?`Europa #${ranks.europeRank}`:null,
+      ranks.germanyRank?`Deutschland #${ranks.germanyRank}`:null
+    ].filter(Boolean).join(" · ");
+    const method=ranks.cached
+      ? `lokaler Cache${ranks.cacheAgeDays!=null?` (${ranks.cacheAgeDays} Tag(e) alt)`:""}`
+      : (ranks.sourceMethod||"Live");
+    sourceText=`Cacherstats ${method}: ${ranks.name||state.profile.csUsername}${where?` · ${where}`:""}${ranks.updated?` · Stand ${ranks.updated}`:""}.`;
+    setCacherstatsLiveStatus(sourceText,ranks.cached?"warn":"good");
+  }else if(ranks?.blocked){
+    sourceText=`Cacherstats blockiert aktuell die automatische Abfrage${ranks.message?`: ${ranks.message}`:""}.${state.profile.knownGermanyRank?` Deutschland #${state.profile.knownGermanyRank} wird als bekannter Referenzwert angezeigt.`:""}`;
+    setCacherstatsLiveStatus(sourceText,"bad");
+  }else if(worldRank||europeRank||germanyRank||manual.totalFinds!=null){
+    sourceText=`Cacherstats Live ohne Treffer. Gespeicherte manuelle Werte werden angezeigt${manual.date?` · Stand ${manual.date}`:""}.`;
+    setCacherstatsLiveStatus(sourceText,"warn");
+  }else{
+    sourceText=`Cacherstats erreichbar, aber kein exakter Treffer; Rankingwerte können manuell hinterlegt werden.`;
+    setCacherstatsLiveStatus(sourceText,"warn");
+  }
+
+  $("#accountStatus").textContent=`${localNote} ${sourceText}`;
+  const source=$("#statsSourceStatus");
+  if(source)source.textContent=sourceText;
+
+  finishProgress("Persönliche Statistik aktualisiert.");
+}
+
+window.addEventListener("beforeinstallprompt",e=>{
+  e.preventDefault();
+  state.deferredPrompt=e;
+  $("#installBtn")?.classList.remove("hidden");
+});
+
+/* Core startup first: map + GPX import must work even if optional modules fail. */
+try{
+  initMap();
+  state.map.on("click",e=>{
+    if(state.parkingPickRoute){
+      const r=state.parkingPickRoute;
+      const lockSequence=!!state.parkingPickLockSequence;
+      state.parkingPickRoute=null;
+      state.parkingPickLockSequence=false;
+      $("#map")?.classList.remove("map-pick-active");
+      applyManualParking(r,e.latlng.lat,e.latlng.lng,lockSequence);
+      return;
+    }
+    if(!state.originPick)return;
+    state.originPick=false;
+    $("#map")?.classList.remove("map-pick-active");
+    setOrigin(e.latlng.lat,e.latlng.lng,"Auf Karte gewählter Punkt");
+    switchTab("touren");
+  });
+}catch(e){
+  console.error("Map init failed",e);
+  showToast("Karte konnte nicht initialisiert werden. GPX-Import bleibt verfügbar.","warn",6000);
+}
+
+const gpxInput=$("#gpxInput");
+if(gpxInput){
+  gpxInput.addEventListener("change",async e=>{
+    const file=e.target.files?.[0];
+    if(file)await loadGPXFile(file);
+  });
+}
+
+/* Remaining UI bindings. A missing optional control should not stop core functions. */
+function bindOptional(selector,event,handler){
+  const el=$(selector);
+  if(el)el.addEventListener(event,handler);
+}
+
+bindOptional("#installBtn","click",async()=>{
+  if(state.deferredPrompt){
+    state.deferredPrompt.prompt();
+    await state.deferredPrompt.userChoice;
+    state.deferredPrompt=null;
+    $("#installBtn")?.classList.add("hidden");
+  }
+});
+
+$$(".nav-btn").forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
+bindOptional("#quickSearch","click",()=>search(true));
+bindOptional("#advancedSearch","click",()=>search(false));
+bindOptional("#sortBy","change",()=>renderRoutes("#advancedResults",state.routes,$("#sortBy")?.value||"quality"));
+bindOptional("#quickSort","change",()=>renderRoutes("#quickResults",state.routes,$("#quickSort")?.value||"quality"));
+bindOptional("#loadDemo","click",async()=>{
+  try{
+    const r=await fetch("sample.gpx");
+    const t=await r.text();
+    state.caches=parseGPX(t);
+    const ignoredDemoWaypoints=state.gpxImportStats?.ignoredWaypoints||0;
+    $("#gpxStatus").textContent=ignoredDemoWaypoints
+      ? `${state.caches.length} Demo-Caches · ${ignoredDemoWaypoints} Zusatzwegpunkt(e) ignoriert`
+      : `${state.caches.length} Demo-Caches geladen`;
+    $("#miniCacheCount").textContent=state.caches.length;
+    if(state.caches.length){
+      const avg=state.caches.reduce((a,c)=>({lat:a.lat+c.lat/state.caches.length,lon:a.lon+c.lon/state.caches.length}),{lat:0,lon:0});
+      state.cacheCentroid=avg;
+      if(!state.originExplicit)setOrigin(avg.lat,avg.lon,"Automatisch: Mittelpunkt des Demo-Cachegebiets",false);
+    }
+    refreshCacheLayer();
+    populateLogCacheSelect();
+    updateTripDataStatus();
+    showToast("Demo-Daten geladen.","success");
+  }catch(e){
+    showToast(`Demo konnte nicht geladen werden: ${e.message}`,"error");
+  }
+});
+
+bindOptional("#originSearchBtn","click",searchOrigin);
+bindOptional("#originSearch","input",suggestOrigin);
+bindOptional("#originSearch","keydown",e=>{if(e.key==="Enter"){e.preventDefault();searchOrigin();}});
+bindOptional("#originLocationBtn","click",useCurrentLocation);
+bindOptional("#originMapBtn","click",enableMapOriginPick);
+bindOptional("#originCacheAreaBtn","click",useCacheAreaOrigin);
+bindOptional("#useLocation","click",useCurrentLocation);
+bindOptional("#mapPlanNew","click",()=>startMapPlanner(false));
+bindOptional("#mapPlanEdit","click",()=>{
+  if(!state.selectedRoute){
+    showToast("Wähle zuerst eine bestehende Route auf der Karte oder starte die freie Planung.","warn",4500);
+    return;
+  }
+  startMapPlanner(true);
+});
+bindOptional("#mapMoveParking","click",()=>{
+  if(!state.selectedRoute){
+    showToast("Wähle oder berechne zuerst eine Route.","warn",4500);
+    return;
+  }
+  const lockSequence=!!state.selectedRoute.manualSelectionLocked ||
+    String(state.selectedRoute.id||"").startsWith("manual-map-");
+  chooseManualParking(state.selectedRoute,lockSequence);
+});
+bindOptional("#mapPlanCalculate","click",calculateMapPlanner);
+bindOptional("#mapPlanClear","click",clearMapPlanner);
+bindOptional("#mapPlanCancel","click",cancelMapPlanner);
+
+bindOptional("#fitMap","click",()=>{
+  if(state.selectedRoute)showRouteOnMap(state.selectedRoute);
+  else if(state.caches.length&&state.map){
+    const b=L.latLngBounds(state.caches.map(c=>[c.lat,c.lon]));
+    state.map.fitBounds(b.pad(.2));
+  }
+});
+bindOptional("#offlineCurrent","click",()=>alert("Angezeigte Kartenausschnitte werden automatisch auf dem Gerät gespeichert und sind danach auch offline verfügbar."));
+bindOptional("#offlineClear","click",async()=>{await fetch("/api/offline-clear",{method:"POST"});showToast("Offline-Karten gelöscht.","success");});
+
+bindOptional("#saveProfile","click",saveProfile);
+bindOptional("#saveAppSettings","click",saveAppSettings);
+bindOptional("#refreshSystemStatus","click",refreshSystemStatus);
+bindOptional("#exportBackup","click",exportBackup);
+bindOptional("#importBackup","change",e=>e.target.files?.[0]&&importBackupFile(e.target.files[0]));
+bindOptional("#savedTourSearch","input",renderSavedTours);
+bindOptional("#savedTourSort","change",renderSavedTours);
+bindOptional("#savedTripSearch","input",renderSavedTrips);
+bindOptional("#savedTripSort","change",renderSavedTrips);
+bindOptional("#saveGooglePlaces","click",saveGooglePlacesSettings);
+bindOptional("#testGooglePlaces","click",testGooglePlacesConnection);
+bindOptional("#refreshStats","click",refreshPersonalStats);
+bindOptional("#testYearStats","click",testYearStats);
+bindOptional("#openProjectGcStats","click",openProjectGcStats);
+bindOptional("#gcLoginBtn","click",gcLogin);
+if(!(window.CR_API&&window.CR_API.isNative())){$("#gcLoginBtn")?.classList.add("hidden");}
+bindOptional("#clearMyFinds","click",clearMyFinds);
+bindOptional("#myFindsInput","change",async e=>{
+  const f=e.target.files?.[0];
+  if(f)await importMyFinds(f);
+  e.target.value="";
+});
+try{updateMyFindsStatus();}catch(e){}
+bindOptional("#resolveGcProfile","click",resolveGeocachingProfile);
+bindOptional("#testCacherstats","click",testCacherstatsLive);
+bindOptional("#openCacherstats","click",openCacherstatsBrowser);
+bindOptional("#saveManualStats","click",saveManualStats);
+bindOptional("#clearManualStats","click",clearManualStats);
+bindOptional("#recalcLocalStats","click",refreshPersonalStats);
+bindOptional("#connectGc","click",connectGeocaching);
+bindOptional("#syncGc","click",syncGeocaching);
+bindOptional("#queueLog","click",queueLog);
+bindOptional("#sendLogs","click",sendQueuedLogs);
+bindOptional("#disconnectGc","click",disconnectGeocaching);
+
+bindOptional("#tripSearchBtn","click",searchTripOrigin);
+bindOptional("#tripSearch","input",suggestTrip);
+bindOptional("#tripSearch","keydown",e=>{if(e.key==="Enter"){e.preventDefault();$("#tripSuggestions")?.classList.add("hidden");searchTripOrigin();}});
+bindOptional("#planTrip","click",planMultiDayTrip);
+bindOptional("#findLodging","click",findLodgingCandidates);
+bindOptional("#lodgingQualityWeight","change",()=>{
+  if(state.currentTripPlan?.routes?.length&&state.lodgingCandidates.length){
+    state.lodgingCandidates=state.lodgingCandidates
+      .map(x=>({...x,fit:lodgingDistanceScore(x,state.currentTripPlan.routes)}))
+      .sort((a,b)=>a.fit.score-b.fit.score);
+    renderLodgingResults();
+  }
+});
+bindOptional("#lodgingReviewSource","change",renderLodgingResults);
+bindOptional("#showTripArea","click",showTripAreaOnMap);
+bindOptional("#tripImportHint","click",tripImportHint);
+bindOptional("#tripDrive","change",updateTripDataStatus);
+bindOptional("#tripDataMode","change",updateTripDataStatus);
+bindOptional("#pauseTour","click",pauseTour);
+bindOptional("#resumeTour","click",resumeTour);
+bindOptional("#finishTour","click",finishTour);
+bindOptional("#clearSavedTours","click",()=>{
+  if(confirm("Alle gespeicherten Touren löschen?")){
+    state.savedTours=[];
+    persistTourState();
+    renderSavedTours();
+    showToast("Gespeicherte Touren gelöscht.","success");
+  }
+});
+bindOptional("#clearSavedTrips","click",()=>{
+  if(confirm("Alle gespeicherten Reisen löschen?")){
+    state.savedTrips=[];
+    persistTourState();
+    renderSavedTrips();
+    showToast("Gespeicherte Reisen gelöscht.","success");
+  }
+});
+
+/* Optional state modules are initialized defensively. */
+try{migrateLocalData();}catch(e){console.warn(e);}
+try{loadProfile();}catch(e){console.warn(e);}
+try{loadManualStats();}catch(e){console.warn(e);}
+try{loadGooglePlacesSettings();}catch(e){console.warn(e);}
+try{loadAppSettings();}catch(e){console.warn(e);}
+try{loadTourState();}catch(e){console.warn(e);}
+refreshSystemStatus().catch(e=>console.warn(e));
+
+window.addEventListener("online",updateNetworkStatus);
+window.addEventListener("offline",updateNetworkStatus);
+
+
+document.addEventListener("click",e=>{
+  if(!e.target.closest("#originSearch") && !e.target.closest("#originSuggestions")){
+    $("#originSuggestions")?.classList.add("hidden");
+  }
+  if(!e.target.closest("#tripSearch") && !e.target.closest("#tripSuggestions")){
+    $("#tripSuggestions")?.classList.add("hidden");
+  }
+});

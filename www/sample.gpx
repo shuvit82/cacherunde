@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="CacheRunde Demo" xmlns="http://www.topografix.com/GPX/1/1" xmlns:groundspeak="http://www.groundspeak.com/cache/1/0/1" xmlns:cr="https://cacherunde.local/schema">
+  <metadata><name>CacheRunde Demo Heidelberg</name></metadata>
+  <wpt lat="49.401" lon="8.668">
+    <ele>128</ele><name>GCDEMO01</name><desc>Waldrand 1</desc><sym>Geocache</sym><type>Geocache|Traditional</type>
+    <groundspeak:cache><groundspeak:type>Traditional</groundspeak:type><groundspeak:difficulty>1.5</groundspeak:difficulty><groundspeak:terrain>2.0</groundspeak:terrain></groundspeak:cache>
+    <cr:corrected>false</cr:corrected>
+  </wpt>
+  <wpt lat="49.404" lon="8.665">
+    <ele>154</ele><name>GCDEMO02</name><desc>Kleine Eiche</desc><sym>Geocache</sym><type>Geocache|Traditional</type>
+    <groundspeak:cache><groundspeak:type>Traditional</groundspeak:type><groundspeak:difficulty>2.0</groundspeak:difficulty><groundspeak:terrain>2.0</groundspeak:terrain></groundspeak:cache>
+    <cr:corrected>false</cr:corrected>
+  </wpt>
+  <wpt lat="49.407" lon="8.6685">
+    <ele>183</ele><name>GCDEMO03</name><desc>Rätsel am Hang</desc><sym>Geocache</sym><type>Geocache|Mystery</type>
+    <groundspeak:cache><groundspeak:type>Mystery</groundspeak:type><groundspeak:difficulty>2.5</groundspeak:difficulty><groundspeak:terrain>2.5</groundspeak:terrain></groundspeak:cache>
+    <cr:corrected>true</cr:corrected>
+  </wpt>
+  <wpt lat="49.409" lon="8.674">
+    <ele>221</ele><name>GCDEMO04</name><desc>Aussichtspfad</desc><sym>Geocache</sym><type>Geocache|Traditional</type>
+    <groundspeak:cache><groundspeak:type>Traditional</groundspeak:type><groundspeak:difficulty>2.0</groundspeak:difficulty><groundspeak:terrain>2.5</groundspeak:terrain></groundspeak:cache>
+    <cr:corrected>false</cr:corrected>
+  </wpt>
+  <wpt lat="49.4075" lon="8.68">
+    <ele>246</ele><name>GCDEMO05</name><desc>Steinbank</desc><sym>Geocache</sym><type>Geocache|Traditional</type>
+    <groundspeak:cache><groundspeak:type>Traditional</groundspeak:type><groundspeak:difficulty>1.5</groundspeak:difficulty><groundspeak:terrain>2.0</groundspeak:terrain></groundspeak:cache>
+    <cr:corrected>false</cr:corrected>
+  </wpt>
+  <wpt lat="49.4035" lon="8.683">
+    <ele>228</ele><name>GCDEMO06</name><desc>Waldkurve</desc><sym>Geocache</sym><type>Geocache|Traditional</type>
+    <groundspeak:cache><groundspeak:type>Traditional</groundspeak:type><groundspeak:difficulty>2.0</groundspeak:difficulty><groundspeak:terrain>2.5</groundspeak:terrain></groundspeak:cache>
+    <cr:corrected>false</cr:corrected>
+  </wpt>
+  <wpt lat="49.399" lon="8.6845">
+    <ele>206</ele><name>GCDEMO07</name><desc>Final im Grün</desc><sym>Geocache</sym><type>Geocache|Mystery</type>
+    <groundspeak:cache><groundspeak:type>Mystery</groundspeak:type><groundspeak:difficulty>3.0</groundspeak:difficulty><groundspeak:terrain>2.0</groundspeak:terrain></groundspeak:cache>
+    <cr:corrected>true</cr:corrected>
+  </wpt>
+  <wpt lat="49.3955" lon="8.681">
+    <ele>178</ele><name>GCDEMO08</name><desc>Bachweg</desc><sym>Geocache</sym><type>Geocache|Traditional</type>
+    <groundspeak:cache><groundspeak:type>Traditional</groundspeak:type><groundspeak:difficulty>1.5</groundspeak:difficulty><groundspeak:terrain>2.0</groundspeak:terrain></groundspeak:cache>
+    <cr:corrected>false</cr:corrected>
+  </wpt>
+  <wpt lat="49.3935" lon="8.675">
+    <ele>151</ele><name>GCDEMO09</name><desc>Alte Brücke</desc><sym>Geocache Found</sym><type>Geocache|Traditional</type>
+    <groundspeak:cache><groundspeak:type>Traditional</groundspeak:type><groundspeak:difficulty>1.5</groundspeak:difficulty><groundspeak:terrain>1.5</groundspeak:terrain></groundspeak:cache>
+    <cr:corrected>false</cr:corrected>
+  </wpt>
+  <wpt lat="49.395" lon="8.669">
+    <ele>139</ele><name>GCDEMO10</name><desc>Wiesenrand</desc><sym>Geocache</sym><type>Geocache|Traditional</type>
+    <groundspeak:cache><groundspeak:type>Traditional</groundspeak:type><groundspeak:difficulty>2.0</groundspeak:difficulty><groundspeak:terrain>1.5</groundspeak:terrain></groundspeak:cache>
+    <cr:corrected>false</cr:corrected>
+  </wpt>
+  <wpt lat="49.399" lon="8.663">
+    <ele>132</ele><name>GCDEMO11</name><desc>Multi Start</desc><sym>Geocache</sym><type>Geocache|Multi</type>
+    <groundspeak:cache><groundspeak:type>Multi</groundspeak:type><groundspeak:difficulty>2.5</groundspeak:difficulty><groundspeak:terrain>2.0</groundspeak:terrain></groundspeak:cache>
+    <cr:corrected>false</cr:corrected>
+  </wpt>
+  <wpt lat="49.411" lon="8.679">
+    <ele>260</ele><name>GCDEMO12</name><desc>Ungelöstes Rätsel</desc><sym>Geocache</sym><type>Geocache|Mystery</type>
+    <groundspeak:cache><groundspeak:type>Mystery</groundspeak:type><groundspeak:difficulty>3.5</groundspeak:difficulty><groundspeak:terrain>3.0</groundspeak:terrain></groundspeak:cache>
+    <cr:corrected>false</cr:corrected>
+  </wpt>
+  <wpt lat="49.402" lon="8.676">
+    <ele>190</ele><name>GCDEMO13</name><desc>Forstweg</desc><sym>Geocache</sym><type>Geocache|Traditional</type>
+    <groundspeak:cache><groundspeak:type>Traditional</groundspeak:type><groundspeak:difficulty>1.5</groundspeak:difficulty><groundspeak:terrain>2.0</groundspeak:terrain></groundspeak:cache>
+    <cr:corrected>false</cr:corrected>
+  </wpt>
+  <wpt lat="49.405" lon="8.6785">
+    <ele>215</ele><name>GCDEMO14</name><desc>Moosstein</desc><sym>Geocache</sym><type>Geocache|Traditional</type>
+    <groundspeak:cache><groundspeak:type>Traditional</groundspeak:type><groundspeak:difficulty>2.0</groundspeak:difficulty><groundspeak:terrain>2.5</groundspeak:terrain></groundspeak:cache>
+    <cr:corrected>false</cr:corrected>
+  </wpt>
+</gpx>

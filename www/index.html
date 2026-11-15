@@ -1,0 +1,655 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0d4f37" />
+  <title>CacheRunde</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" href="icon-192.png" />
+  <link rel="apple-touch-icon" href="icon-192.png" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <div class="brand">CacheRunde</div>
+      <div class="subtitle">Prototype 0.13.0 · Echtrouting</div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center"><span class="pill" style="background:#fff;color:#0d4f37">Build 0.13.0</span><div class="top-status">
+          <span id="networkBadge" class="status-chip">Netz: …</span>
+          <span id="offlineBadge" class="status-chip">Offline: …</span>
+        </div>
+        <button id="installBtn" class="ghost hidden">Installieren</button></div>
+  </header>
+<div id="globalProgress" class="global-progress hidden">
+  <div class="progress-head">
+    <strong id="progressTitle">CacheRunde arbeitet …</strong>
+    <span id="progressPercent">0 %</span>
+  </div>
+  <div class="progress-track"><div id="progressBar" class="progress-bar"></div></div>
+  <div id="progressText" class="progress-text">Bereit.</div>
+</div>
+<div style="background:#fff3cd;color:#664d03;border-bottom:1px solid #ffecb5;padding:8px 18px;text-align:center;font-weight:800">
+  TESTBUILD 0.13.0 · ohne lokalen Server</div>
+
+  <div id="toast" class="toast hidden"></div>
+
+<main class="app-shell">
+    <section id="tab-heute" class="tab active">
+      <div class="hero card">
+        <div>
+          <span class="eyebrow">HEUTE</span>
+          <h1>Wie viel Zeit hast du?</h1>
+          <p>Finde automatisch eine passende Cache-Runde aus deinen GPX-Daten.</p>
+        </div>
+        <div class="stats-mini">
+          <div><strong id="miniCacheCount">0</strong><span>importiert</span></div>
+          <div><strong id="miniCandidateCount">0</strong><span>geeignet</span></div>
+        </div>
+      </div>
+
+      <div class="card form-grid">
+        <label>Mindestzahl Caches
+          <select id="quickMinCaches">
+            <option value="0" selected>Keine Mindestzahl</option>
+            <option value="3">mind. 3</option><option value="5">mind. 5</option>
+            <option value="8">mind. 8</option><option value="10">mind. 10</option>
+            <option value="15">mind. 15</option><option value="20">mind. 20</option>
+            <option value="25">mind. 25</option><option value="30">mind. 30</option>
+          </select>
+        </label>
+        <label>Max. Wanderzeit
+          <select id="quickMaxTime">
+            <option value="120">2 Stunden</option>
+            <option value="180">3 Stunden</option>
+            <option value="240" selected>4 Stunden</option>
+            <option value="300">5 Stunden</option>
+            <option value="360">6 Stunden</option>
+          </select>
+        </label>
+        <label>Max. Abstand
+          <select id="quickGap">
+            <option value="10">10 Minuten</option>
+            <option value="15" selected>15 Minuten</option>
+            <option value="20">20 Minuten</option>
+            <option value="30">30 Minuten</option>
+          </select>
+        </label>
+        <label>Parken
+          <select id="quickParkingMode">
+            <option value="designated">Nur ausgewiesene Parkplätze</option>
+            <option value="fallback" selected>Parkplatz bevorzugen · Straßenrand als Fallback</option>
+            <option value="roadside">Straßenrand mitprüfen</option>
+          </select>
+        </label>
+        <label>Suchradius
+          <select id="quickRadius">
+            <option value="5">5 km</option>
+            <option value="10" selected>10 km</option>
+            <option value="20">20 km</option>
+            <option value="30">30 km</option>
+          </select>
+        </label>
+        <label class="toggle-row"><input id="quickShade" type="checkbox"/> Schatten bevorzugen <span class="beta">Phase 2</span></label>
+        <label>Ergebnisse sortieren
+          <select id="quickSort">
+            <option value="quality" selected>Qualität</option>
+            <option value="cacheRate">Caches pro Stunde</option>
+            <option value="roundSize">Rundengröße</option>
+            <option value="distance">Entfernung zum Ausgangspunkt</option>
+            <option value="duration">Dauer</option>
+            <option value="length">Wanderstrecke</option>
+          </select>
+        </label>
+        <button id="quickSearch" class="primary span2">Touren für heute finden</button>
+      </div>
+
+      <div class="card">
+        <div class="section-head">
+          <h2>Daten</h2>
+          <span id="gpxStatus" class="pill">Noch keine GPX-Datei</span>
+        </div>
+        <div class="data-actions">
+          <label class="file-btn">GPX importieren<input id="gpxInput" type="file" accept=".gpx,application/gpx+xml"/></label>
+          <button id="loadDemo" class="ghost">Demo laden</button>
+          <button id="useLocation" class="ghost">Standort verwenden</button>
+        </div>
+        <p class="muted">Mysterys werden nur berücksichtigt, wenn im GPX eine Final-/Corrected-Markierung erkannt wird. Gefundene Caches und Multis werden standardmäßig ausgeschlossen.</p>
+      </div>
+
+      <div id="quickResults" class="results"></div>
+    </section>
+
+    <section id="tab-touren" class="tab">
+      <div class="card">
+        <span class="eyebrow">GEZIELT PLANEN</span>
+        <h1>Neue Tour</h1>
+        <div class="form-grid">
+          <label>Tourtyp
+            <select id="tourType">
+              <option value="round" selected>Rundwanderung</option>
+              <option value="ab">A → B (experimentell)</option>
+            </select>
+          </label>
+          <label>Suchradius
+            <select id="radius">
+              <option>5</option><option selected>10</option><option>20</option><option>30</option>
+            </select>
+          </label>
+          <label>Max. Gehzeit zwischen Caches
+            <select id="maxGap">
+              <option>5</option><option>10</option><option selected>15</option><option>20</option><option>30</option>
+            </select>
+          </label>
+          <label>Parken
+            <select id="parkingMode">
+              <option value="designated">Nur ausgewiesene Parkplätze</option>
+              <option value="fallback" selected>Parkplatz bevorzugen · Straßenrand als Fallback</option>
+              <option value="roadside">Straßenrand mitprüfen</option>
+            </select>
+          </label>
+          <label>Mindestzahl Caches
+            <select id="minCaches">
+              <option value="0" selected>Keine Mindestzahl</option>
+              <option value="3">mind. 3</option><option value="5">mind. 5</option>
+              <option value="8">mind. 8</option><option value="10">mind. 10</option>
+              <option value="15">mind. 15</option><option value="20">mind. 20</option>
+              <option value="25">mind. 25</option><option value="30">mind. 30</option>
+            </select>
+          </label>
+          <label>Max. Wanderzeit
+            <select id="maxTime">
+              <option value="120">2 h</option><option value="180">3 h</option><option value="240" selected>4 h</option>
+              <option value="300">5 h</option><option value="360">6 h</option>
+            </select>
+          </label>
+          <label>Gehgeschwindigkeit
+            <select id="speed">
+              <option value="4">4,0 km/h</option><option value="4.5" selected>4,5 km/h</option><option value="5">5,0 km/h</option>
+            </select>
+          </label>
+          <label>Zeit je Cache
+            <select id="stopTime">
+              <option value="3">3 min</option><option value="5" selected>5 min</option><option value="8">8 min</option><option value="10">10 min</option>
+            </select>
+          </label>
+          <div class="span2 origin-box">
+            <label>Ausgangspunkt suchen
+              <div class="search-row"><input id="originSearch" type="search" placeholder="Ort, Adresse oder Parkplatz …" autocomplete="off"/><button id="originSearchBtn" type="button" class="ghost">Suchen</button></div>
+              <div id="originSuggestions" class="search-suggestions hidden"></div>
+            </label>
+            <div id="originMatches" class="origin-matches"></div>
+            <div class="origin-actions"><button id="originLocationBtn" type="button" class="ghost">Mein Standort</button><button id="originMapBtn" type="button" class="ghost">Auf Karte wählen</button><button id="originCacheAreaBtn" type="button" class="ghost">Zum Cachegebiet</button></div>
+            <label>Verwendung des Ausgangspunkts
+              <select id="originMode"><option value="area" selected>Im Umkreis nach Runden suchen</option><option value="exact">Runde genau ab diesem Punkt</option></select>
+            </label>
+            <div class="coords-row">
+              <label>Breite<input id="startLat" type="number" step="0.000001" value="49.39875"/></label>
+              <label>Länge<input id="startLon" type="number" step="0.000001" value="8.672434"/></label>
+            </div>
+            <div id="originStatus" class="muted">Bitte Ausgangspunkt wählen.</div>
+          </div>
+          <label class="toggle-row"><input id="excludeFound" type="checkbox" checked/> Gefundene ausschließen</label>
+          <label class="toggle-row"><input id="tradis" type="checkbox" checked/> Tradis</label>
+          <label class="toggle-row"><input id="mysteries" type="checkbox" checked/> Mystery nur mit Final</label>
+          <label class="toggle-row"><input id="multis" type="checkbox"/> Multis</label>
+          <label>Sortieren nach
+            <select id="sortBy">
+              <option value="quality" selected>Qualität</option>
+              <option value="cacheRate">Caches pro Stunde</option>
+              <option value="roundSize">Rundengröße</option>
+              <option value="distance">Entfernung zum Ausgangspunkt</option>
+              <option value="duration">Dauer</option>
+              <option value="length">Wanderstrecke</option>
+              <option value="elevation">Höhenmeter</option>
+            </select>
+          </label>
+          <button id="advancedSearch" class="primary span2">Touren suchen</button>
+        </div>
+      </div>
+      <div class="card"><strong>Suchstatus</strong><div id="searchDebug" class="muted">Noch keine Suche durchgeführt.</div></div><div class="card routing-note">
+      <strong>Prototype 0.2: zweistufiges Routing</strong>
+      <p class="muted">Die Suche erzeugt zunächst schnell Kandidaten. Mit „Echtroute + Parkplatz“ wird die Tour über echte Fußwege geprüft, bei Bedarf automatisch repariert, ein geeigneter Parkplatz bewertet und ein echtes Höhenprofil berechnet.</p>
+      <div id="routingStatus" class="muted"></div>
+    </div>
+    <div class="card">
+      <div class="section-head">
+        <h2>Gespeicherte Touren</h2>
+        <button id="clearSavedTours" class="ghost">Alle löschen</button>
+      </div>
+      <div class="manage-row">
+        <input id="savedTourSearch" type="search" placeholder="Gespeicherte Tour suchen …"/>
+        <select id="savedTourSort">
+          <option value="recent" selected>Neueste zuerst</option>
+          <option value="name">Name</option>
+          <option value="distance">Strecke</option>
+          <option value="caches">Cachezahl</option>
+        </select>
+      </div>
+      <div id="savedTours" class="results"></div>
+    </div>
+    <div id="advancedResults" class="results"></div>
+    </section>
+
+    <section id="tab-reise" class="tab">
+      <div class="hero card"><div><span class="eyebrow">MEHRTAGESTOUR</span><h1>Cache-Reise planen</h1><p>Mehrere unterschiedliche Cacherunden rund um einen Urlaubsort planen.</p></div></div>
+      <div class="card form-grid">
+        <label class="span2">Reise-Ausgangspunkt
+          <div class="search-row"><input id="tripSearch" type="search" placeholder="z. B. Glauberg" autocomplete="off"/><button id="tripSearchBtn" type="button" class="ghost">Suchen</button></div>
+          <div id="tripSuggestions" class="search-suggestions hidden"></div>
+        </label>
+        <label>Anzahl Tage<select id="tripDays"><option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option><option>7</option></select></label>
+        <label>Max. Anfahrt pro Tag<select id="tripDrive"><option value="15">15 min</option><option value="25" selected>25 min</option><option value="40">40 min</option><option value="60">60 min</option></select></label>
+        <label>Max. Wanderzeit pro Tag<select id="tripWalk"><option value="180">3 h</option><option value="240" selected>4 h</option><option value="300">5 h</option><option value="360">6 h</option></select></label>
+        <label>Mindestzahl Caches<select id="tripMinCaches"><option value="0">Keine</option><option value="5">5</option><option value="8">8</option><option value="10" selected>10</option><option value="15">15</option><option value="20">20</option></select></label>
+        <label>Priorität<select id="tripPriority"><option value="balanced" selected>Ausgewogen</option><option value="caches">Viele Caches</option><option value="drive">Wenig Anfahrt</option><option value="hike">Kompakte Wanderungen</option></select></label>
+        <label>Reale Prüfung
+          <select id="tripOptimizeDepth">
+            <option value="4">Schnell · bis 4 Kandidaten</option>
+            <option value="6" selected>Ausgewogen · bis 6 Kandidaten</option>
+            <option value="8">Gründlich · bis 8 Kandidaten</option>
+          </select>
+        </label>
+        <label>Übernachtung
+          <select id="lodgingType">
+            <option value="none" selected>Nicht berücksichtigen</option>
+            <option value="camping">Campingplatz</option>
+            <option value="camper">Wohnmobilstellplatz</option>
+            <option value="hotel">Hotel / Pension</option>
+            <option value="apartment">Ferienwohnung / Apartment</option>
+            <option value="any">Egal · passende Unterkunft</option>
+          </select>
+        </label>
+        <label>Max. Entfernung Unterkunft → Tagesrunden
+          <select id="lodgingRadius">
+            <option value="10">10 km</option>
+            <option value="20" selected>20 km</option>
+            <option value="30">30 km</option>
+            <option value="40">40 km</option>
+          </select>
+        </label>
+        <label>Check-in
+          <input id="lodgingCheckin" type="date"/>
+        </label>
+        <label>Check-out
+          <input id="lodgingCheckout" type="date"/>
+        </label>
+        <label>Bewertung gewichten
+          <select id="lodgingQualityWeight">
+            <option value="0">Nicht berücksichtigen</option>
+            <option value="1" selected>Normal</option>
+            <option value="2">Stark</option>
+          </select>
+        </label>
+        <label>Bewertungsquelle
+          <select id="lodgingReviewSource">
+            <option value="auto" selected>Automatisch passend</option>
+            <option value="campinginfo">camping.info</option>
+            <option value="googlemaps">Google Maps</option>
+          </select>
+        </label>
+        <label>Bewertungsquelle
+          <select id="lodgingReviewSource">
+            <option value="auto" selected>Automatisch passend</option>
+            <option value="campinginfo">camping.info</option>
+            <option value="googlemaps">Google Maps</option>
+          </select>
+        </label>
+        <button id="findLodging" type="button" class="ghost">Unterkünfte suchen</button>
+        <div class="span2 muted" id="lodgingStatus"></div>
+        <div class="span2" id="lodgingResults"></div>
+        <label>Datenquelle
+          <select id="tripDataMode">
+            <option value="local" selected>Nur importierte Caches</option>
+            <option value="prepare">Reisegebiet vorbereiten</option>
+          </select>
+        </label>
+        <label>Vorbereitungsradius
+          <select id="tripPrepRadius">
+            <option value="20">20 km</option>
+            <option value="30" selected>30 km</option>
+            <option value="40">40 km</option>
+            <option value="50">50 km</option>
+          </select>
+        </label>
+        <div class="span2 muted" id="tripOriginStatus">Noch kein Reise-Ausgangspunkt gewählt.</div>
+        <div class="span2 card" id="tripDataStatus">
+          <strong>Datenbestand im Reisegebiet</strong>
+          <div class="muted" id="tripDataText">Wähle zuerst einen Reise-Ausgangspunkt.</div>
+          <div id="tripPrepActions" class="data-actions" style="margin-top:10px">
+            <button id="showTripArea" class="ghost">Reisegebiet auf Karte zeigen</button>
+            <button id="tripImportHint" class="ghost">Welche GPX-Daten brauche ich?</button>
+          </div>
+        </div>
+        <button id="planTrip" class="primary span2">Mehrtagestour planen</button>
+      </div>
+      <div class="card">
+        <div class="section-head">
+          <h2>Gespeicherte Reisen</h2>
+          <button id="clearSavedTrips" class="ghost">Alle löschen</button>
+        </div>
+        <div class="manage-row">
+          <input id="savedTripSearch" type="search" placeholder="Gespeicherte Reise suchen …"/>
+          <select id="savedTripSort">
+            <option value="recent" selected>Neueste zuerst</option>
+            <option value="name">Name</option>
+            <option value="days">Anzahl Tage</option>
+          </select>
+        </div>
+        <div id="savedTrips"></div>
+      </div>
+      <div id="tripResults" class="results"></div>
+    </section>
+
+    <section id="tab-karte" class="tab map-tab">
+      <div id="activeTourPanel" class="card hidden">
+        <div class="section-head">
+          <div>
+            <span class="eyebrow">AKTIVE TOUR</span>
+            <h2 id="activeTourName" style="margin:4px 0">—</h2>
+          </div>
+          <span id="activeTourState" class="pill">bereit</span>
+        </div>
+        <div class="profile-grid">
+          <div><strong id="activeRemainingCaches">0</strong><span>noch Caches</span></div>
+          <div><strong id="activeRemainingKm">0 km</strong><span>Reststrecke</span></div>
+          <div><strong id="activeRemainingTime">0 min</strong><span>Restzeit</span></div>
+          <div><strong id="activeFoundCount">0</strong><span>erledigt</span></div>
+        </div>
+        <div class="data-actions" style="margin-top:12px">
+          <button id="pauseTour" class="ghost">Pause</button>
+          <button id="resumeTour" class="ghost">Fortsetzen</button>
+          <button id="finishTour" class="primary">Tour beenden</button>
+        </div>
+      </div>
+      <div class="map-toolbar">
+        <button id="fitMap" class="ghost">Alles anzeigen</button>
+        <button id="mapPlanNew" class="primary">Freie Planung</button>
+        <button id="mapPlanEdit" class="ghost">Aktuelle Route gesammelt bearbeiten</button>
+        <button id="mapMoveParking" class="ghost">Parkplatz setzen / verschieben</button>
+        <button id="offlineCurrent" class="ghost">Kartenausschnitt offline speichern</button>
+        <button id="offlineClear" class="ghost">Offline-Karten löschen</button>
+      </div>
+      <div id="mapPlannerPanel" class="card map-planner-panel hidden">
+        <div class="section-head">
+          <div>
+            <span class="eyebrow">KARTENPLANUNG</span>
+            <h2 style="margin:4px 0">Caches sammeln, dann einmal berechnen</h2>
+          </div>
+          <span id="mapPlannerCount" class="pill">0 ausgewählt</span>
+        </div>
+        <p class="muted">Tippe Cachemarker an, um mehrere Caches an- oder abzuwählen. Es wird erst neu geroutet, wenn du die Auswahl berechnen lässt.</p>
+        <div id="mapPlannerSelection" class="map-planner-selection muted">Noch keine Caches ausgewählt.</div>
+        <div class="data-actions" style="margin-top:10px">
+          <button id="mapPlanCalculate" class="primary">Auswahl optimieren & berechnen</button>
+          <button id="mapPlanClear" class="ghost">Auswahl leeren</button>
+          <button id="mapPlanCancel" class="ghost">Planung beenden</button>
+        </div>
+      </div>
+      <div id="map"></div>
+      <div id="mapInfo" class="map-info card">
+        <strong>Keine Tour gewählt</strong>
+        <span>Wähle in „Heute“ oder „Touren“ eine Route aus.</span>
+      </div>
+    </section>
+
+    <section id="tab-ich" class="tab">
+      <div class="card">
+        <span class="eyebrow">ICH</span>
+        <h1>Mein Geocaching</h1>
+        <div class="profile-grid">
+          <div><strong id="statTotalFinds">—</strong><span>Gesamtfunde</span></div>
+          <div><strong id="statYearFinds">—</strong><span>dieses Jahr</span></div>
+          <div><strong id="statWorldRank">—</strong><span>Weltweit</span></div>
+          <div><strong id="statEuropeRank">—</strong><span>Europa</span></div>
+          <div><strong id="statGermanyRank">—</strong><span>Deutschland</span></div>
+        </div>
+        <div class="form-grid" style="margin-top:14px">
+          <label>Geocaching-Benutzername
+            <input id="gcUsername" type="text" placeholder="Dein Benutzername"/>
+          </label>
+          <label>Cacherstats-Benutzername
+            <input id="csUsername" type="text" placeholder="meist identisch"/>
+          </label>
+          <label class="span2">Geocaching-Profil-URL
+            <input id="gcProfileUrl" type="url" value="https://www.geocaching.com/p/default.aspx?guid=363b1243-156e-4600-ade9-81c58d8b57b4" placeholder="https://www.geocaching.com/p/default.aspx?guid=..."/>
+          </label>
+          <label>Bekannter Deutschland-Rang
+            <input id="knownGermanyRank" type="number" min="1" step="1" value="52364" placeholder="z. B. 52364"/>
+          </label>
+          <button id="resolveGcProfile" class="ghost">Profilnamen erkennen</button>
+          <button id="saveProfile" class="primary span2">Profil speichern</button>
+          <button id="refreshStats" class="ghost span2">Statistiken aktualisieren</button>
+        </div>
+        <div id="accountStatus" class="muted" style="margin-top:10px">Noch kein persönliches Profil gespeichert.</div>
+      </div>
+
+      <div class="card">
+        <span class="eyebrow">STATISTIK</span>
+        <h2>Meine Fundstatistik</h2>
+        <div class="profile-grid stats-detail-grid">
+          <div><strong id="statImportedOwnFinds">—</strong><span>Funde im importierten GPX</span></div>
+          <div><strong id="statTraditionalFinds">—</strong><span>Traditionals</span></div>
+          <div><strong id="statMysteryFinds">—</strong><span>Mysterys</span></div>
+          <div><strong id="statMultiFinds">—</strong><span>Multis</span></div>
+          <div><strong id="statLastFind">—</strong><span>Letzter Fund</span></div>
+          <div><strong id="statActiveMonths">—</strong><span>aktive Monate im GPX</span></div>
+          <div><strong id="statThisYearDetailed">—</strong><span>Funde dieses Jahr</span></div>
+          <div><strong id="statBestYear">—</strong><span>Bestes Jahr bisher</span></div>
+          <div><strong id="statToNewRecord">—</strong><span>Noch bis neuem Bestwert</span></div>
+        </div>
+
+        <div id="statsMonthly" class="stats-monthly"></div><div id="yearStatsSource" class="muted" style="margin-top:6px">Jahresstatistik noch nicht ausgewertet.</div>
+        <div class="data-actions" style="margin-top:8px">
+          <button id="testYearStats" class="ghost">Jahreswerte neu prüfen</button>
+          <button id="gcLoginBtn" class="ghost">Bei geocaching.com anmelden</button>
+          <button id="openProjectGcStats" class="ghost">Project-GC Profilstatistik öffnen</button>
+        </div>
+        <div class="stats-source-box">
+          <strong>„My Finds“-Pocket-Query</strong>
+          <p class="muted">Alternative ohne Login: Auf geocaching.com unter Pocket Queries „My Finds“ anfordern, die GPX-Datei aus der ZIP hier importieren. Wird nur für die Statistik verwendet, nicht für die Routensuche. Adventure Labs sind darin nicht enthalten.</p>
+          <div class="data-actions">
+            <label class="file-btn">My Finds GPX importieren<input id="myFindsInput" type="file" accept=".gpx,application/gpx+xml"/></label>
+            <button id="clearMyFinds" class="ghost">My-Finds-Daten löschen</button>
+          </div>
+          <div id="myFindsStatus" class="muted" style="margin-top:6px">Noch keine „My Finds“-Pocket-Query importiert.</div>
+        </div>
+
+        <div class="stats-source-box">
+          <strong>Ranking Welt / Europa / Deutschland</strong>
+          <p class="muted">Automatische Cacherstats-Abfrage wird weiterhin versucht. Falls sie blockiert wird, kannst du die Werte hier manuell hinterlegen; sie bleiben lokal gespeichert.</p>
+          <div class="form-grid">
+            <label>Gesamtfunde
+              <input id="manualTotalFinds" type="number" min="0" step="1" placeholder="z. B. 1234"/>
+            </label>
+            <label>Funde dieses Jahr
+              <input id="manualYearFinds" type="number" min="0" step="1" placeholder="z. B. 87"/>
+            </label>
+            <label>Rang weltweit
+              <input id="manualWorldRank" type="number" min="1" step="1" placeholder="z. B. 12345"/>
+            </label>
+            <label>Rang Europa
+              <input id="manualEuropeRank" type="number" min="1" step="1" placeholder="z. B. 4567"/>
+            </label>
+            <label>Rang Deutschland
+              <input id="manualGermanyRank" type="number" min="1" step="1" placeholder="z. B. 987"/>
+            </label>
+            <label>Stand
+              <input id="manualStatsDate" type="date"/>
+            </label>
+            <button id="saveManualStats" class="primary span2">Statistikwerte speichern</button>
+            <button id="clearManualStats" class="ghost span2">Manuelle Rankingwerte löschen</button>
+          </div>
+          <div class="data-actions" style="margin-top:10px">
+            <button id="testCacherstats" class="ghost">Cacherstats Live testen</button>
+            <button id="openCacherstats" class="ghost">Cacherstats im Browser öffnen</button>
+          </div>
+          <div id="cacherstatsLiveStatus" class="muted" style="margin-top:8px">Live-Provider noch nicht getestet.</div>
+          <div id="statsSourceStatus" class="muted" style="margin-top:10px">Noch keine Statistikquelle ausgewertet.</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="eyebrow">APP & EINSTELLUNGEN</span>
+        <h2>Standardwerte & System</h2>
+        <div class="form-grid">
+          <label>Standard Suchradius
+            <select id="settingsRadius">
+              <option value="5">5 km</option><option value="10">10 km</option><option value="20">20 km</option><option value="30">30 km</option>
+            </select>
+          </label>
+          <label>Standard Cache-Abstand
+            <select id="settingsMaxGap">
+              <option value="5">5 min</option><option value="10">10 min</option><option value="15">15 min</option><option value="20">20 min</option><option value="30">30 min</option>
+            </select>
+          </label>
+          <label>Standard Wanderzeit
+            <select id="settingsMaxTime">
+              <option value="120">2 h</option><option value="180">3 h</option><option value="240">4 h</option><option value="300">5 h</option><option value="360">6 h</option>
+            </select>
+          </label>
+          <label>Gehgeschwindigkeit
+            <select id="settingsSpeed">
+              <option value="4">4,0 km/h</option><option value="4.5">4,5 km/h</option><option value="5">5,0 km/h</option>
+            </select>
+          </label>
+          <label>Zeit pro Cache
+            <select id="settingsStopTime">
+              <option value="3">3 min</option><option value="5">5 min</option><option value="8">8 min</option><option value="10">10 min</option>
+            </select>
+          </label>
+          <label>Standard Mindestcaches
+            <select id="settingsMinCaches">
+              <option value="0">Keine</option><option value="3">3</option><option value="5">5</option><option value="8">8</option><option value="10">10</option><option value="15">15</option><option value="20">20</option>
+            </select>
+          </label>
+          <button id="saveAppSettings" class="primary span2">Standardwerte speichern</button>
+        </div>
+
+        <div class="system-grid">
+          <div><strong id="systemNetwork">—</strong><span>Netzwerk</span></div>
+          <div><strong id="systemRouting">—</strong><span>Routing</span></div>
+          <div><strong id="systemMaps">—</strong><span>Offline-Karten</span></div>
+          <div><strong id="systemGoogle">—</strong><span>Google Ratings</span></div>
+          <div><strong id="systemGc">—</strong><span>Geocaching Provider</span></div>
+          <div><strong id="systemStorage">—</strong><span>Lokale Daten</span></div>
+        </div>
+
+        <div class="data-actions" style="margin-top:12px">
+          <button id="refreshSystemStatus" class="ghost">Status aktualisieren</button>
+          <button id="exportBackup" class="ghost">Backup exportieren</button>
+          <label class="file-btn">Backup importieren<input id="importBackup" type="file" accept=".json,application/json"/></label>
+        </div>
+        <div id="settingsStatus" class="muted" style="margin-top:10px">Datenformat v1 · Einstellungen werden lokal gespeichert.</div>
+      </div>
+
+      <div class="card">
+        <h2>Geocaching Provider</h2>
+        <p class="muted">0.13.0 enthält einen realistischen Test Provider für Profil, Funde, Mystery-Finals und Logs. Er nutzt lokale Test-/GPX-Daten und kann später gegen eine autorisierte Schnittstelle ausgetauscht werden.</p>
+        <div class="form-grid">
+          <label>Provider
+            <select id="gcProvider">
+              <option value="mock" selected>Test Provider</option>
+              <option value="official" disabled>Offizielle API (später)</option>
+            </select>
+          </label>
+          <label>Testprofil
+            <select id="mockProfile">
+              <option value="normal">Standardprofil</option>
+              <option value="premium">Premiumprofil</option>
+              <option value="empty">Leeres Profil</option>
+            </select>
+          </label>
+          <button id="connectGc" class="primary">Test Provider verbinden</button>
+          <button id="disconnectGc" class="ghost">Verbindung trennen</button>
+          <button id="syncGc" class="ghost span2">Synchronisieren</button>
+        </div>
+        <div id="gcApiStatus" class="muted" style="margin-top:10px">Nicht verbunden.</div>
+      </div>
+
+      <div class="card">
+        <h2>Logging testen</h2>
+        <div class="form-grid">
+          <label>Cache
+            <select id="logCacheSelect"></select>
+          </label>
+          <label>Logtyp
+            <select id="logType">
+              <option value="Found it">Found it</option>
+              <option value="Didn't find it">Didn't find it</option>
+              <option value="Write note">Write note</option>
+            </select>
+          </label>
+          <label class="span2">Logtext
+            <textarea id="logText" rows="4" placeholder="Logtext …"></textarea>
+          </label>
+          <button id="queueLog" class="primary">Log vormerken</button>
+          <button id="sendLogs" class="ghost">Vorgemerkte Logs senden</button>
+        </div>
+        <div id="logQueueStatus" class="muted" style="margin-top:10px">Keine Logs vorgemerkt.</div>
+      </div>
+
+      <div class="card">
+        <h2>Google Places Bewertungen</h2>
+        <p class="muted">Optionaler Provider für Sternebewertung und Bewertungsanzahl von Unterkünften. Der API-Key wird nur lokal auf deinem PC gespeichert.</p>
+        <div class="form-grid">
+          <label class="span2">Google Places API-Key
+            <input id="googlePlacesKey" type="password" placeholder="API-Key einfügen"/>
+          </label>
+          <label class="toggle-row"><input id="googleRatingsEnabled" type="checkbox"/> Google-Bewertungen direkt laden</label>
+          <button id="saveGooglePlaces" class="primary">Einstellungen speichern</button>
+          <button id="testGooglePlaces" class="ghost span2">Google-Places-Verbindung testen</button>
+        </div>
+        <div id="googlePlacesStatus" class="muted" style="margin-top:10px">Nicht konfiguriert.</div>
+      </div>
+
+      <div class="card">
+        <h2>Lokale Funde</h2>
+        <p class="muted">Bis zur offiziellen API-Anbindung kann CacheRunde Funde aus importierten GPX-Daten und manuell markierten Caches zählen.</p>
+        <div class="data-actions">
+          <button id="recalcLocalStats" class="ghost">Lokale Statistik neu berechnen</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <nav class="bottom-nav">
+    <button data-tab="heute" class="nav-btn active">Heute</button>
+    <button data-tab="touren" class="nav-btn">Touren</button>
+    <button data-tab="reise" class="nav-btn">Reise</button>
+    <button data-tab="karte" class="nav-btn">Karte</button>
+    <button data-tab="ich" class="nav-btn">Ich</button>
+  </nav>
+
+  <template id="routeTemplate">
+    <article class="route-card card">
+      <div class="route-head">
+        <div><span class="rank"></span><h3 class="route-name"></h3></div>
+        <span class="score pill"></span>
+      </div>
+      <div class="route-metrics"></div>
+      <div class="cache-line"></div>
+      <div class="route-actions">
+        <button class="refine-route primary">Echtroute + Parkplatz</button>
+        <button class="view-route ghost">Auf Karte</button>
+        <button class="download-gpx ghost">GPX</button>
+<button class="share-gpx ghost">Teilen / Komoot</button><button class="manual-parking ghost">Parkplatz manuell</button><button class="save-tour ghost">Tour speichern</button><button class="start-tour primary">Tour starten</button>
+      </div>
+    </article>
+  </template>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script>
+window.addEventListener("error", function(e){
+  var s=document.getElementById("gpxStatus");
+  if(s && /DEFAULT_APP_SETTINGS|ReferenceError|app\.js/i.test(String(e.message||""))){
+    s.textContent="App-Startfehler";
+  }
+});
+</script>
+<script src="api-local.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
