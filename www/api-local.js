@@ -11,7 +11,7 @@
 (function(){
   "use strict";
 
-  const VERSION="0.13.0";
+  const VERSION="0.14.0";
   const TILE_CACHE="cacherunde-tiles";
   const nativeFetch=window.fetch.bind(window);
 
@@ -22,7 +22,7 @@
   ];
 
   // Wird in der Android-App durch native Implementierungen ergänzt.
-  const CR_NATIVE=window.CR_NATIVE||null;
+  const native=()=>window.CR_NATIVE||null;
   const isNative=()=>!!(window.Capacitor&&window.Capacitor.isNativePlatform&&window.Capacitor.isNativePlatform());
 
   /* ---------- Hilfsfunktionen ---------- */
@@ -320,22 +320,30 @@
     /* --- nur in der Android-App --- */
 
     async "/api/gc-stats"(q){
-      if(CR_NATIVE&&CR_NATIVE.gcStats)return json(await CR_NATIVE.gcStats(q.get("url"),q.get("force")==="1"));
+      if(native()&&native().gcStats)return json(await native().gcStats(q.get("url"),q.get("force")==="1"));
       return json({available:false,yearly:[],message:"Direkter Abruf von geocaching.com geht nur in der Android-App. Im Browser: „My Finds“ importieren."});
     },
 
     async "/api/gc-login"(q){
-      if(CR_NATIVE&&CR_NATIVE.gcLogin)return json(await CR_NATIVE.gcLogin(q.get("url")));
+      if(native()&&native().gcLogin)return json(await native().gcLogin(q.get("url")));
       return json({ok:false,message:"Die Anmeldung bei geocaching.com ist nur in der Android-App verfügbar."});
     },
 
     async "/api/geocaching-profile-public"(q){
-      if(CR_NATIVE&&CR_NATIVE.gcProfileName)return json(await CR_NATIVE.gcProfileName(q.get("url")));
+      if(native()&&native().gcProfileName)return json(await native().gcProfileName(q.get("url")));
       return json({message:notInBrowser("Das Auslesen des Profilnamens")},501);
     },
 
+    async "/api/gc-search"(q){
+      if(native()&&native().gcSearch){
+        try{return json(await native().gcSearch(q));}
+        catch(e){return json({ok:false,message:e.message||String(e)},502);}
+      }
+      return json({ok:false,message:"Die Cache-Suche über geocaching.com geht nur in der Android-App. Im Browser: Pocket Query als GPX importieren."});
+    },
+
     async "/api/cacherstats"(q){
-      if(CR_NATIVE&&CR_NATIVE.cacherstats)return json(await CR_NATIVE.cacherstats(q));
+      if(native()&&native().cacherstats)return json(await native().cacherstats(q));
       return json({matched:false,blocked:true,message:notInBrowser("Die Cacherstats-Abfrage")});
     }
   };

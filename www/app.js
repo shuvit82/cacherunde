@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.13.0";
+const APP_VERSION="0.14.0";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -3955,12 +3955,145 @@ async function gcLogin(){
     const res=await fetch(`/api/gc-login?url=${encodeURIComponent(url)}`,{cache:"no-store"});
     const d=await res.json();
     if(!d.ok)throw new Error(d.message||`HTTP ${res.status}`);
-    showToast("Anmeldefenster geöffnet. Bitte dort bei geocaching.com anmelden, das Fenster danach schließen und dann „Jahreswerte neu prüfen“ klicken.","success",10000);
+    showToast("Bitte bei geocaching.com anmelden. Nach dem Login schließt sich das Fenster automatisch.","success",8000);
     const src=$("#yearStatsSource");
-    if(src)src.innerHTML="<strong>Anmeldung läuft</strong> · Nach dem Login das separate Browserfenster schließen und „Jahreswerte neu prüfen“ klicken.";
+    if(src)src.innerHTML="<strong>Anmeldung läuft</strong> · Nach dem Login schließt sich das Fenster und die Werte werden neu geladen.";
   }catch(e){
     showToast(`Anmeldefenster konnte nicht geöffnet werden: ${e.message}`,"error",6000);
   }
+}
+
+/* ---- Caches direkt von geocaching.com (nur Android-App, seit 0.14.0) ---- */
+
+const GC_TYPE_NAMES={
+  2:"Traditional Cache",3:"Multi-cache",4:"Virtual Cache",5:"Letterbox Hybrid",6:"Event Cache",
+  8:"Unknown Cache",11:"Webcam Cache",13:"Cache In Trash Out Event",137:"Earthcache",
+  453:"Mega-Event Cache",1858:"Wherigo Cache",3653:"Community Celebration Event",7005:"Giga-Event Cache"
+};
+const GC_EVENT_TYPES=new Set([6,13,453,3653,7005]);
+const GC_CACHE_KEY="cacherunde-gc-caches";
+
+function isNativeApp(){
+  return !!(window.CR_API&&window.CR_API.isNative());
+}
+
+function gcResultToCache(r){
+  const raw=GC_TYPE_NAMES[r.type]||`Typ ${r.type}`;
+  const pos=r.corrected||{lat:r.lat,lon:r.lon};
+  const logs=[];
+  if(r.lastFound)logs.push({finder:"",type:"Found it",date:r.lastFound});
+  return {
+    id:r.code,
+    name:r.name,
+    lat:+pos.lat,
+    lon:+pos.lon,
+    type:normalizeType(raw),
+    rawCacheType:raw,
+    found:!!r.found,
+    corrected:!!r.corrected,
+    logs,
+    ele:null,
+    difficulty:Number.isFinite(+r.difficulty)?+r.difficulty:null,
+    terrain:Number.isFinite(+r.terrain)?+r.terrain:null,
+    source:"geocaching.com",
+    favorites:r.favorites||0,
+    premiumOnly:!!r.premiumOnly,
+    owner:r.owner||"",
+    dnfByMe:!!r.dnf,
+    postedLat:r.lat,postedLon:r.lon
+  };
+}
+
+function applyLoadedCaches(caches,statusText){
+  state.caches=caches;
+  $("#gpxStatus").textContent=statusText;
+  $("#miniCacheCount").textContent=caches.length;
+  if(caches.length){
+    const avg=caches.reduce((a,c)=>({lat:a.lat+c.lat/caches.length,lon:a.lon+c.lon/caches.length}),{lat:0,lon:0});
+    state.cacheCentroid=avg;
+  }
+  refreshCacheLayer();
+  populateLogCacheSelect();
+  updateTripDataStatus();
+  try{refreshPersonalStats();}catch(e){}
+}
+
+function planningCenter(){
+  const lat=parseFloat($("#startLat")?.value),lon=parseFloat($("#startLon")?.value);
+  return Number.isFinite(lat)&&Number.isFinite(lon)?{lat,lon}:null;
+}
+
+async function loadCachesFromGeocaching(){
+  if(!isNativeApp()){
+    showToast("Die Cache-Suche über geocaching.com geht nur in der Android-App.","error",5000);
+    return;
+  }
+  const center=planningCenter();
+  if(!center){
+    showToast("Bitte zuerst einen Ausgangspunkt wählen (Standort verwenden oder Ort suchen).","error",5000);
+    return;
+  }
+  const radius=+($("#quickRadius")?.value||10);
+  const onProgress=e=>{
+    const {loaded,total}=e.detail||{};
+    const pct=total?Math.min(90,10+Math.round(80*loaded/total)):30;
+    setProgress(pct,`${loaded}${total?` von ${total}`:""} Caches geladen …`,"geocaching.com");
+  };
+  window.addEventListener("cr-gc-search-progress",onProgress);
+  try{
+    setProgress(5,`Suche Caches im Umkreis von ${radius} km …`,"geocaching.com");
+    const r=await fetch(`/api/gc-search?lat=${center.lat}&lon=${center.lon}&radius=${radius}&hideFound=1&max=1000`,{cache:"no-store"});
+    const d=await r.json();
+    if(!d.ok){
+      if(d.loginRequired){
+        failProgress("Nicht bei geocaching.com angemeldet.");
+        if(confirm("Du bist in CacheRunde noch nicht bei geocaching.com angemeldet. Jetzt anmelden?"))gcLogin();
+        return;
+      }
+      throw new Error(d.message||"Suche fehlgeschlagen");
+    }
+    const me=(d.user||"").toLowerCase();
+    const caches=(d.results||[])
+      .filter(x=>x.status===0)
+      .filter(x=>!GC_EVENT_TYPES.has(x.type))
+      .filter(x=>!(me&&x.owner&&x.owner.toLowerCase()===me))
+      .map(gcResultToCache)
+      .filter(c=>Number.isFinite(c.lat)&&Number.isFinite(c.lon));
+    const mysteries=caches.filter(c=>c.type==="Mystery");
+    const solved=mysteries.filter(c=>c.corrected).length;
+    const save={loadedAt:new Date().toISOString(),center,radius,user:d.user,total:d.total,truncated:!!d.truncated,caches};
+    try{localStorage.setItem(GC_CACHE_KEY,JSON.stringify(save));}catch(e){}
+    const status=`${caches.length} Caches von geocaching.com · ${radius} km`;
+    applyLoadedCaches(caches,status);
+    finishProgress(`${caches.length} Caches geladen.`);
+    showToast(
+      `${caches.length} Caches geladen (ohne gefundene, deaktivierte und Events). Mysterys mit gelöstem Final: ${solved} von ${mysteries.length}.`+
+      (d.truncated?` Achtung: auf 1000 von ${d.total} begrenzt – Radius verkleinern.`:""),
+      "success",8000
+    );
+  }catch(e){
+    failProgress(e.message||String(e));
+    showToast(`Caches konnten nicht geladen werden: ${e.message||e}`,"error",7000);
+  }finally{
+    window.removeEventListener("cr-gc-search-progress",onProgress);
+  }
+}
+
+function restoreGcCaches(){
+  try{
+    const s=JSON.parse(localStorage.getItem(GC_CACHE_KEY)||"null");
+    if(!s||!Array.isArray(s.caches)||!s.caches.length)return;
+    if(state.caches&&state.caches.length)return;
+    const when=new Date(s.loadedAt).toLocaleString("de-DE",{dateStyle:"short",timeStyle:"short"});
+    applyLoadedCaches(s.caches,`${s.caches.length} Caches von geocaching.com · Stand ${when}`);
+  }catch(e){}
+}
+
+function initGcSearchUi(){
+  const native=isNativeApp();
+  $("#gcLoadCaches")?.classList.toggle("hidden",!native);
+  $("#gcLoginBtnData")?.classList.toggle("hidden",!native);
+  restoreGcCaches();
 }
 
 function parseMyFindsGpx(text,username){
@@ -4466,6 +4599,13 @@ bindOptional("#refreshStats","click",refreshPersonalStats);
 bindOptional("#testYearStats","click",testYearStats);
 bindOptional("#openProjectGcStats","click",openProjectGcStats);
 bindOptional("#gcLoginBtn","click",gcLogin);
+bindOptional("#gcLoginBtnData","click",gcLogin);
+bindOptional("#gcLoadCaches","click",loadCachesFromGeocaching);
+window.addEventListener("cr-gc-login-closed",()=>{
+  showToast("Anmeldefenster geschlossen. Lade Statistik neu …","success",3000);
+  try{testYearStats();}catch(e){}
+});
+setTimeout(()=>{try{initGcSearchUi();}catch(e){console.warn(e);}},300);
 if(!(window.CR_API&&window.CR_API.isNative())){$("#gcLoginBtn")?.classList.add("hidden");}
 bindOptional("#clearMyFinds","click",clearMyFinds);
 bindOptional("#myFindsInput","change",async e=>{

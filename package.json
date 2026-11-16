@@ -1,0 +1,18 @@
+{
+  "name": "cacherunde",
+  "version": "0.14.0",
+  "private": true,
+  "description": "Geocaching-Rundenfinder – Web-App und Android-App (Capacitor)",
+  "scripts": {
+    "android:prepare": "npx cap add android && node scripts/patch-android.mjs && npx cap sync android",
+    "android:build": "cd android && ./gradlew assembleRelease"
+  },
+  "dependencies": {
+    "@capacitor/android": "latest",
+    "@capacitor/core": "latest",
+    "@capgo/capacitor-inappbrowser": "latest"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "latest"
+  }
+}

@@ -3,7 +3,7 @@
 Geocaching-Rundenfinder: plant Cache-Runden zu Fuß mit echtem Wegerouting, Parkplatzsuche, Unterkünften und persönlicher Fundstatistik.
 
 - **Web-Version:** https://shuvit82.github.io/cacherunde/
-- **Android-App:** folgt (wird aus demselben Code mit Capacitor gebaut)
+- **Android-App:** https://github.com/shuvit82/cacherunde/releases/tag/android-latest (APK, wird bei jeder Änderung automatisch gebaut)
 
 ## Aufbau
 
@@ -12,7 +12,9 @@ Geocaching-Rundenfinder: plant Cache-Runden zu Fuß mit echtem Wegerouting, Park
 | `www/` | Die komplette App (HTML, CSS, JavaScript). Läuft ohne Server direkt im Browser. |
 | `www/api-local.js` | Ersetzt den früheren lokalen PowerShell-Server. Fängt alle `/api/...`-Aufrufe ab und spricht die Dienste direkt an. |
 | `www/sw.js` | Service Worker: App offline nutzbar, angezeigte Kartenkacheln werden gespeichert. |
-| `.github/workflows/` | Automatische Veröffentlichung der Web-Version (und später der Android-APK). |
+| `www/gc-native.js` | Nur in der App: Login, Cache-Suche und Statistik über geocaching.com. |
+| `capacitor.config.json`, `scripts/`, `resources/` | Android-App (Capacitor): Konfiguration, Anpassungen, Icons. |
+| `.github/workflows/` | Automatische Veröffentlichung der Web-Version und Bau der Android-APK. |
 
 ## Externe Dienste
 
@@ -41,6 +43,7 @@ Dann http://localhost:8080 öffnen.
 
 ## Versionen
 
+- **0.14.0** – Android-App. Cache-Suche und Statistik direkt über den eigenen geocaching.com-Account (inoffiziell, nur in der App).
 - **0.13.0** – Kein lokaler Server mehr nötig. PWA mit Icons, Offline-Cache für App und Karten.
 - **0.12.1** – Jahresstatistik über geocaching.com-Login und „My Finds“-Import.
 - **bis 0.12.0** – Windows-Version mit lokalem PowerShell-Server.

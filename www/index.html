@@ -15,9 +15,9 @@
   <header class="topbar">
     <div>
       <div class="brand">CacheRunde</div>
-      <div class="subtitle">Prototype 0.13.0 · Echtrouting</div>
+      <div class="subtitle">Prototype 0.14.0 · Echtrouting</div>
     </div>
-    <div style="display:flex;gap:8px;align-items:center"><span class="pill" style="background:#fff;color:#0d4f37">Build 0.13.0</span><div class="top-status">
+    <div style="display:flex;gap:8px;align-items:center"><span class="pill" style="background:#fff;color:#0d4f37">Build 0.14.0</span><div class="top-status">
           <span id="networkBadge" class="status-chip">Netz: …</span>
           <span id="offlineBadge" class="status-chip">Offline: …</span>
         </div>
@@ -32,7 +32,7 @@
   <div id="progressText" class="progress-text">Bereit.</div>
 </div>
 <div style="background:#fff3cd;color:#664d03;border-bottom:1px solid #ffecb5;padding:8px 18px;text-align:center;font-weight:800">
-  TESTBUILD 0.13.0 · ohne lokalen Server</div>
+  TESTBUILD 0.14.0 · Android-App · Cache-Suche über geocaching.com</div>
 
   <div id="toast" class="toast hidden"></div>
 
@@ -112,10 +112,13 @@
           <span id="gpxStatus" class="pill">Noch keine GPX-Datei</span>
         </div>
         <div class="data-actions">
+          <button id="gcLoadCaches" class="primary hidden">Caches von geocaching.com laden</button>
+          <button id="gcLoginBtnData" class="ghost hidden">Bei geocaching.com anmelden</button>
           <label class="file-btn">GPX importieren<input id="gpxInput" type="file" accept=".gpx,application/gpx+xml"/></label>
           <button id="loadDemo" class="ghost">Demo laden</button>
           <button id="useLocation" class="ghost">Standort verwenden</button>
         </div>
+        <p class="muted">In der App lädt „Caches von geocaching.com laden“ alle noch nicht gefundenen Caches um den Ausgangspunkt im gewählten Suchradius – inklusive deiner korrigierten Mystery-Koordinaten. Die Liste bleibt auf dem Gerät gespeichert und ist unterwegs auch offline verfügbar.</p>
         <p class="muted">Mysterys werden nur berücksichtigt, wenn im GPX eine Final-/Corrected-Markierung erkannt wird. Gefundene Caches und Multis werden standardmäßig ausgeschlossen.</p>
       </div>
 
@@ -547,7 +550,7 @@
 
       <div class="card">
         <h2>Geocaching Provider</h2>
-        <p class="muted">0.13.0 enthält einen realistischen Test Provider für Profil, Funde, Mystery-Finals und Logs. Er nutzt lokale Test-/GPX-Daten und kann später gegen eine autorisierte Schnittstelle ausgetauscht werden.</p>
+        <p class="muted">0.14.0 enthält einen realistischen Test Provider für Profil, Funde, Mystery-Finals und Logs. Er nutzt lokale Test-/GPX-Daten und kann später gegen eine autorisierte Schnittstelle ausgetauscht werden.</p>
         <div class="form-grid">
           <label>Provider
             <select id="gcProvider">
@@ -649,6 +652,7 @@ window.addEventListener("error", function(e){
   }
 });
 </script>
+<script src="gc-native.js"></script>
 <script src="api-local.js"></script>
 <script src="app.js"></script>
 </body>
