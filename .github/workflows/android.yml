@@ -37,6 +37,19 @@ jobs:
       - name: Abhängigkeiten installieren
         run: npm install --no-audit --no-fund
 
+      - name: Capacitor-Kern in die App kopieren
+        run: |
+          node -e '
+            const fs=require("fs"),path=require("path");
+            const dir=path.dirname(require.resolve("@capacitor/core/package.json"));
+            const pkg=require(path.join(dir,"package.json"));
+            const candidates=[pkg.unpkg,pkg.jsdelivr,"dist/capacitor.js"].filter(Boolean);
+            const src=candidates.map(f=>path.join(dir,f)).find(f=>fs.existsSync(f));
+            if(!src){console.error("Capacitor-Kern nicht gefunden:",candidates);console.error(fs.readdirSync(path.join(dir,"dist")));process.exit(1);}
+            fs.copyFileSync(src,"www/capacitor.js");
+            console.log("Kopiert:",path.relative(process.cwd(),src),"→ www/capacitor.js ("+pkg.version+")");
+          '
+
       - name: Signierschlüssel bereitstellen
         env:
           CR_KEYSTORE_B64: ${{ secrets.CR_KEYSTORE_B64 }}

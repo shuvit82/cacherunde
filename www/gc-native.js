@@ -18,8 +18,39 @@
   const PAGE_DELAY_MS=900;
   const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 
-  function browserPlugin(){
-    return (cap.Plugins&&cap.Plugins.InAppBrowser)||(cap.registerPlugin&&cap.registerPlugin("InAppBrowser"));
+  // Capacitor-Kern (registerPlugin) nachladen. Die Datei legt der Android-Build in die App.
+  const coreReady=new Promise(resolve=>{
+    if(cap.registerPlugin)return resolve(true);
+    const s=document.createElement("script");
+    s.src="capacitor.js";
+    s.onload=()=>resolve(!!(window.Capacitor&&window.Capacitor.registerPlugin));
+    s.onerror=()=>resolve(false);
+    document.head.appendChild(s);
+  });
+
+  // Ersatz, falls der Kern fehlt: Plugin direkt über die native Brücke ansprechen.
+  function bridgePlugin(name){
+    const c=window.Capacitor;
+    if(!c||typeof c.nativePromise!=="function")return null;
+    return {
+      openWebView:o=>c.nativePromise(name,"openWebView",o),
+      close:o=>c.nativePromise(name,"close",o||{}),
+      removeAllListeners:()=>c.nativePromise(name,"removeAllListeners",{}),
+      addListener:(eventName,cb)=>{
+        const id=c.nativeCallback(name,"addListener",{eventName},cb);
+        return Promise.resolve({remove:()=>c.nativePromise(name,"removeListener",{eventName,callbackId:id})});
+      }
+    };
+  }
+
+  async function browserPlugin(){
+    await coreReady;
+    const c=window.Capacitor||cap;
+    if(c.Plugins&&c.Plugins.InAppBrowser)return c.Plugins.InAppBrowser;
+    if(typeof c.registerPlugin==="function"){
+      try{return c.registerPlugin("InAppBrowser");}catch(e){}
+    }
+    return bridgePlugin("InAppBrowser");
   }
 
   async function getHtml(url){
@@ -41,8 +72,8 @@
   /* ---------- Login ---------- */
 
   async function gcLogin(){
-    const IAB=browserPlugin();
-    if(!IAB)return {ok:false,message:"In-App-Browser nicht verfügbar."};
+    const IAB=await browserPlugin();
+    if(!IAB)return {ok:false,message:"In-App-Browser nicht verfügbar (Capacitor-Brücke fehlt)."};
     try{await IAB.removeAllListeners();}catch(e){}
     let closedByUs=false;
     try{
@@ -59,11 +90,15 @@
         window.dispatchEvent(new CustomEvent("cr-gc-login-closed"));
       });
     }catch(e){}
-    await IAB.openWebView({
-      url:`${GC}/account/signin?returnUrl=${encodeURIComponent("/play")}`,
-      title:"geocaching.com Anmeldung",
-      toolbarType:"compact"
-    });
+    try{
+      await IAB.openWebView({
+        url:`${GC}/account/signin?returnUrl=${encodeURIComponent("/play")}`,
+        title:"geocaching.com Anmeldung",
+        toolbarType:"compact"
+      });
+    }catch(e){
+      return {ok:false,message:"Anmeldefenster ließ sich nicht öffnen: "+(e&&e.message||e)};
+    }
     return {ok:true,browser:"In-App-Browser"};
   }
 
