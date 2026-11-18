@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.14.2";
+const APP_VERSION="0.14.3";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -2251,9 +2251,28 @@ function enableMapOriginPick(){
   $("#mapInfo").innerHTML="<strong>Ausgangspunkt wählen</strong><span>Auf die gewünschte Stelle der Karte klicken.</span>";
 }
 function useCurrentLocation(){
-  navigator.geolocation?.getCurrentPosition(pos=>{
+  if(!navigator.geolocation){alert("Dieses Gerät kann keinen Standort liefern.");return;}
+  $("#originStatus").textContent="Ausgangspunkt: Standort wird ermittelt …";
+  navigator.geolocation.getCurrentPosition(pos=>{
     setOrigin(pos.coords.latitude,pos.coords.longitude,"Mein Standort");
-  },()=>alert("Standort konnte nicht gelesen werden."));
+  },err=>{
+    $("#originStatus").textContent="Ausgangspunkt: Standort nicht verfügbar";
+    alert(err&&err.code===1
+      ?"Standortzugriff wurde verweigert. Bitte in den App- bzw. Browser-Einstellungen erlauben."
+      :"Standort konnte nicht gelesen werden.");
+  },{enableHighAccuracy:true,timeout:15000,maximumAge:60000});
+}
+
+// Beim Start den aktuellen Standort als Ausgangspunkt übernehmen (still, ohne Fehlermeldung).
+function autoLocateOrigin(){
+  if(!navigator.geolocation||state.originExplicit)return;
+  $("#originStatus").textContent="Ausgangspunkt: Standort wird ermittelt …";
+  navigator.geolocation.getCurrentPosition(pos=>{
+    if(state.originExplicit)return; // Nutzer hat inzwischen selbst gewählt
+    setOrigin(pos.coords.latitude,pos.coords.longitude,"Mein Standort (automatisch)");
+  },()=>{
+    if(!state.originExplicit)$("#originStatus").textContent="Ausgangspunkt: Standort nicht verfügbar – bitte Ort suchen oder auf der Karte wählen";
+  },{enableHighAccuracy:false,timeout:12000,maximumAge:5*60000});
 }
 
 
@@ -4553,6 +4572,7 @@ bindOptional("#originLocationBtn","click",useCurrentLocation);
 bindOptional("#originMapBtn","click",enableMapOriginPick);
 bindOptional("#originCacheAreaBtn","click",useCacheAreaOrigin);
 bindOptional("#useLocation","click",useCurrentLocation);
+setTimeout(()=>{try{autoLocateOrigin();}catch(e){console.warn(e);}},600);
 bindOptional("#mapPlanNew","click",()=>startMapPlanner(false));
 bindOptional("#mapPlanEdit","click",()=>{
   if(!state.selectedRoute){

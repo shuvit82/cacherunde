@@ -11,7 +11,7 @@
 (function(){
   "use strict";
 
-  const VERSION="0.14.2";
+  const VERSION="0.14.3";
   const TILE_CACHE="cacherunde-tiles";
   const nativeFetch=window.fetch.bind(window);
 
@@ -50,9 +50,8 @@
   // Weiterleiten wie früher Proxy-Get: Statuscode und Inhalt 1:1 an die App.
   async function passThrough(url,ms=45000){
     try{
-      const r=await fetchWithTimeout(url,{headers:{"Accept":"application/json"}},ms);
-      const body=await r.text();
-      return new Response(body,{status:r.ok?200:502,headers:{"Content-Type":"application/json; charset=utf-8"}});
+      const r=await fetchRetry(url,{headers:{"Accept":"application/json"}},{timeout:ms});
+      return new Response(await r.text(),{status:200,headers:{"Content-Type":"application/json; charset=utf-8"}});
     }catch(e){
       return text(e.message||String(e),502);
     }
@@ -74,6 +73,45 @@
     }
     throw new Error("Alle Overpass-Server fehlgeschlagen: "+errors.join(" | "));
   }
+  // Wiederholt Anfragen bei Netzfehlern, 429 und 5xx mit wachsender Pause.
+  async function fetchRetry(url,init={},{tries=4,timeout=45000,label=""}={}){
+    let last="";
+    for(let i=0;i<tries;i++){
+      if(i>0){
+        const wait=Math.min(8000,1500*Math.pow(2,i-1));
+        await new Promise(r=>setTimeout(r,wait));
+      }
+      try{
+        const r=await fetchWithTimeout(url,init,timeout);
+        if(r.ok)return r;
+        last=`HTTP ${r.status}`;
+        try{last+=": "+(await r.text()).slice(0,160);}catch(e){}
+        if(r.status!==429&&r.status<500)break; // 4xx außer 429: Wiederholen sinnlos
+      }catch(e){
+        last=e.name==="AbortError"?"Zeitüberschreitung":(e.message||String(e));
+      }
+    }
+    throw new Error(`${label||new URL(url).hostname} nach ${tries} Versuchen fehlgeschlagen (${last})`);
+  }
+
+  // Google-Polyline mit 6 Nachkommastellen → [[lon,lat],...]
+  function decodePolyline6(str){
+    let i=0,lat=0,lng=0;const out=[];
+    while(i<str.length){
+      let b,shift=0,res=0;
+      do{b=str.charCodeAt(i++)-63;res|=(b&31)<<shift;shift+=5;}while(b>=32);
+      lat+=(res&1)?~(res>>1):(res>>1);
+      shift=0;res=0;
+      do{b=str.charCodeAt(i++)-63;res|=(b&31)<<shift;shift+=5;}while(b>=32);
+      lng+=(res&1)?~(res>>1):(res>>1);
+      out.push([lng/1e6,lat/1e6]);
+    }
+    return out;
+  }
+
+  const footCache=new Map();
+  const FOOT_CACHE_MAX=150;
+
   function num(v){const n=parseFloat(v);return Number.isFinite(n)?n:null;}
   function bbox(lat,lon,dLat,dLon){
     return `${lon-dLon},${lat+dLat},${lon+dLon},${lat-dLat}`; // left,top,right,bottom
@@ -95,8 +133,31 @@
     async "/api/foot"(q){
       const coords=q.get("coords");
       if(!coords)return text("coords fehlt",400);
-      const steps=q.get("steps")||"false";
-      return passThrough(`https://routing.openstreetmap.de/routed-foot/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=${steps}`);
+      const steps=q.get("steps")==="true";
+      const key=coords+"|"+steps;
+      if(footCache.has(key)){
+        const hit=footCache.get(key);
+        footCache.delete(key);footCache.set(key,hit); // zuletzt benutzt nach hinten
+        return json(hit);
+      }
+      // Ohne Schritte: kompaktes polyline6 statt GeoJSON (ca. 4x kleiner), danach zurückwandeln.
+      const geom=steps?"geojson":"polyline6";
+      const url=`https://routing.openstreetmap.de/routed-foot/route/v1/driving/${coords}?overview=full&geometries=${geom}&steps=${steps}`;
+      try{
+        const r=await fetchRetry(url,{headers:{"Accept":"application/json"}},{label:"Fußrouting"});
+        const data=await r.json();
+        if(data.code!=="Ok")return json(data,200);
+        if(!steps){
+          for(const rt of data.routes||[]){
+            if(typeof rt.geometry==="string")rt.geometry={type:"LineString",coordinates:decodePolyline6(rt.geometry)};
+          }
+        }
+        footCache.set(key,data);
+        if(footCache.size>FOOT_CACHE_MAX)footCache.delete(footCache.keys().next().value);
+        return json(data);
+      }catch(e){
+        return text(e.message||String(e),502);
+      }
     },
 
     async "/api/car"(q){
