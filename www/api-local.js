@@ -11,7 +11,7 @@
 (function(){
   "use strict";
 
-  const VERSION="0.14.1";
+  const VERSION="0.14.2";
   const TILE_CACHE="cacherunde-tiles";
   const nativeFetch=window.fetch.bind(window);
 

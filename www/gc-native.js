@@ -43,14 +43,21 @@
     };
   }
 
+  const PLUGIN_NAMES=["InAppBrowser","CapgoInAppBrowser"];
+  let lastPluginInfo="";
+
   async function browserPlugin(){
-    await coreReady;
+    const coreOk=await coreReady;
     const c=window.Capacitor||cap;
-    if(c.Plugins&&c.Plugins.InAppBrowser)return c.Plugins.InAppBrowser;
+    const avail=n=>{try{return typeof c.isPluginAvailable==="function"?c.isPluginAvailable(n):null;}catch(e){return null;}};
+    lastPluginInfo=`Kern ${coreOk?"geladen":"fehlt"}, Brücke ${typeof c.nativePromise==="function"?"ok":"fehlt"}, `+
+      PLUGIN_NAMES.map(n=>`${n}: ${avail(n)}`).join(", ");
+    const name=PLUGIN_NAMES.find(n=>avail(n)===true)||PLUGIN_NAMES[0];
+    if(c.Plugins&&c.Plugins[name])return c.Plugins[name];
     if(typeof c.registerPlugin==="function"){
-      try{return c.registerPlugin("InAppBrowser");}catch(e){}
+      try{return c.registerPlugin(name);}catch(e){}
     }
-    return bridgePlugin("InAppBrowser");
+    return bridgePlugin(name);
   }
 
   async function getHtml(url){
@@ -73,7 +80,7 @@
 
   async function gcLogin(){
     const IAB=await browserPlugin();
-    if(!IAB)return {ok:false,message:"In-App-Browser nicht verfügbar (Capacitor-Brücke fehlt)."};
+    if(!IAB)return {ok:false,message:`In-App-Browser nicht verfügbar [0.14.2 · ${lastPluginInfo}]`};
     try{await IAB.removeAllListeners();}catch(e){}
     let closedByUs=false;
     try{
@@ -97,7 +104,7 @@
         toolbarType:"compact"
       });
     }catch(e){
-      return {ok:false,message:"Anmeldefenster ließ sich nicht öffnen: "+(e&&e.message||e)};
+      return {ok:false,message:`Anmeldefenster ließ sich nicht öffnen: ${e&&e.message||e} [0.14.2 · ${lastPluginInfo}]`};
     }
     return {ok:true,browser:"In-App-Browser"};
   }

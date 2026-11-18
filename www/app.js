@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.14.1";
+const APP_VERSION="0.14.2";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
