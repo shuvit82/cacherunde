@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.14.3";
+const APP_VERSION="0.15.0";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -2368,26 +2368,178 @@ function populateLogCacheSelect(){
   });
 }
 
+
+
+/* ---- Logbuch der Tour (seit 0.15.0) ----
+   Logs werden unterwegs mit Zeitstempel gesammelt und am Ende auf einmal
+   als Entwürfe (früher "Field Notes") zu geocaching.com hochgeladen. */
+
+const LOG_TYPES=["Found it","Didn't find it","Write note","Needs Maintenance"];
+const LOG_TYPE_LABELS={"Found it":"Gefunden","Didn't find it":"Nicht gefunden","Write note":"Notiz","Needs Maintenance":"Wartung nötig"};
+
+function normalizePendingLog(l){
+  return {
+    id:l.id||`log-${Date.parse(l.date)||Date.now()}-${Math.random().toString(36).slice(2,7)}`,
+    cacheId:l.cacheId,
+    name:l.name||state.caches.find(c=>c.id===l.cacheId)?.name||"",
+    type:LOG_TYPES.includes(l.type)?l.type:"Write note",
+    text:l.text||"",
+    date:l.date||new Date().toISOString(),
+    uploadedAt:l.uploadedAt||null
+  };
+}
+
+function openLogs(){return state.pendingLogs.filter(l=>!l.uploadedAt);}
+
+function addPendingLog(cacheId,type,text=""){
+  const cache=state.caches.find(c=>c.id===cacheId);
+  const log=normalizePendingLog({cacheId,type,text,name:cache?.name||"",date:new Date().toISOString()});
+  state.pendingLogs.push(log);
+  if(type==="Found it"&&cache){
+    cache.found=true;
+    markCacheCompleted(cache.id);
+    refreshCacheLayer();
+  }
+  persistTourState();
+  renderLogList();
+  return log;
+}
+
 function updateLogQueueStatus(){
   const el=$("#logQueueStatus");
   if(!el)return;
-  el.textContent=state.pendingLogs.length
-    ? `${state.pendingLogs.length} Log(s) vorgemerkt.`
-    : "Keine Logs vorgemerkt.";
+  const open=openLogs().length,done=state.pendingLogs.length-open;
+  el.textContent=open
+    ? `${open} Log(s) bereit zum Hochladen${done?` · ${done} bereits hochgeladen`:""}.`
+    : (done?`Alle ${done} Log(s) hochgeladen.`:"Noch keine Logs auf dieser Tour.");
+  const n=$("#logCountBadge");
+  if(n){n.textContent=open;n.classList.toggle("hidden",!open);}
+}
+
+function escapeHtmlText(s){
+  return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function renderLogList(){
+  const host=$("#logList");
+  updateLogQueueStatus();
+  if(!host)return;
+  if(!state.pendingLogs.length){host.innerHTML='<div class="muted">Tippe auf der Karte bei einem Cache auf „Found it“, „DNF“ oder „Notiz“ – oder wähle oben einen Cache aus.</div>';return;}
+  const rows=[...state.pendingLogs].sort((a,b)=>a.date.localeCompare(b.date)).map(l=>{
+    const t=new Date(l.date).toLocaleString("de-DE",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"});
+    const opts=LOG_TYPES.map(x=>`<option value="${x}"${x===l.type?" selected":""}>${LOG_TYPE_LABELS[x]}</option>`).join("");
+    const dis=l.uploadedAt?" disabled":"";
+    return `<div class="log-item${l.uploadedAt?" log-uploaded":""}" data-log="${escapeHtmlText(l.id)}">
+      <div class="log-head"><strong>${escapeHtmlText(l.cacheId)}</strong> · ${escapeHtmlText(l.name)}<span class="muted"> · ${t}</span>
+        ${l.uploadedAt?'<span class="pill">hochgeladen ✓</span>':""}</div>
+      <div class="log-row">
+        <select class="log-type"${dis}>${opts}</select>
+        <button class="ghost log-del" title="Log löschen">Löschen</button>
+      </div>
+      <textarea class="log-text" rows="2" placeholder="Logtext (optional, kann auch später auf geocaching.com ergänzt werden)"${dis}>${escapeHtmlText(l.text)}</textarea>
+    </div>`;
+  });
+  host.innerHTML=rows.join("");
+}
+
+function onLogListEvent(e){
+  const item=e.target.closest(".log-item");
+  if(!item)return;
+  const log=state.pendingLogs.find(l=>l.id===item.dataset.log);
+  if(!log)return;
+  if(e.target.classList.contains("log-del")&&e.type==="click"){
+    if(!log.uploadedAt&&!confirm(`Log für ${log.cacheId} löschen?`))return;
+    state.pendingLogs=state.pendingLogs.filter(l=>l!==log);
+  }else if(e.target.classList.contains("log-type")&&e.type==="change"){
+    log.type=e.target.value;
+  }else if(e.target.classList.contains("log-text")&&e.type==="input"){
+    log.text=e.target.value;
+    persistTourState();updateLogQueueStatus();
+    return; // kein Neuaufbau während des Tippens
+  }else return;
+  persistTourState();
+  renderLogList();
 }
 
 function queueLog(){
   const cacheId=$("#logCacheSelect").value;
   if(!cacheId){alert("Bitte Cache wählen.");return;}
-  state.pendingLogs.push({
-    cacheId,
-    type:$("#logType").value,
-    text:$("#logText").value.trim(),
-    date:new Date().toISOString()
-  });
-  persistTourState();
+  addPendingLog(cacheId,$("#logType").value,$("#logText").value.trim());
   $("#logText").value="";
-  updateLogQueueStatus();
+  showToast(`Log für ${cacheId} vorgemerkt.`,"success",3000);
+}
+
+/* Feldnotiz-Datei: eine Zeile pro Log, UTF-16LE mit BOM (Format der GPS-Geräte). */
+function fieldNotesText(logs){
+  return logs.map(l=>{
+    const when=new Date(l.date).toISOString().slice(0,16)+"Z";
+    const text=String(l.text||"").replace(/\r?\n/g," ").replace(/"/g,'""');
+    return `${l.cacheId},${when},${l.type},"${text}"`;
+  }).join("\r\n")+"\r\n";
+}
+function utf16leBytes(str){
+  const out=new Uint8Array(2+str.length*2);
+  out[0]=0xFF;out[1]=0xFE;
+  for(let i=0;i<str.length;i++){const c=str.charCodeAt(i);out[2+2*i]=c&255;out[3+2*i]=c>>8;}
+  return out;
+}
+
+function exportFieldNotes(){
+  const logs=openLogs();
+  if(!logs.length){showToast("Keine offenen Logs zum Exportieren.","warn",3500);return;}
+  const blob=new Blob([utf16leBytes(fieldNotesText(logs))],{type:"text/plain"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="geocache_visits.txt";
+  document.body.appendChild(a);a.click();a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),5000);
+  showToast("Datei gespeichert. Auf geocaching.com unter Entwürfe → „Upload drafts“ hochladen.","success",8000);
+}
+
+async function uploadLogsAsDrafts(){
+  const logs=openLogs();
+  if(!logs.length){showToast("Keine offenen Logs zum Hochladen.","warn",3500);return;}
+  if(!isNativeApp()){exportFieldNotes();return;}
+  const found=logs.filter(l=>l.type==="Found it").length;
+  if(!confirm(`${logs.length} Log(s) als Entwürfe zu geocaching.com hochladen (${found} × gefunden)?\n\nDie Entwürfe erscheinen in deinem Account unter „Entwürfe“ bzw. in der Geocaching-App und werden erst veröffentlicht, wenn du sie dort abschickst.`))return;
+  try{
+    setProgress(20,`Lade ${logs.length} Log(s) hoch …`,"Entwürfe hochladen");
+    const res=await fetch("/api/gc-drafts-upload",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:fieldNotesText(logs)})});
+    const d=await res.json();
+    if(!d.ok){
+      if(d.loginRequired){
+        failProgress("Nicht bei geocaching.com angemeldet.");
+        if(confirm("Für das Hochladen musst du bei geocaching.com angemeldet sein. Jetzt anmelden?"))gcLogin();
+        return;
+      }
+      throw new Error(d.message||"Hochladen fehlgeschlagen");
+    }
+    const now=new Date().toISOString();
+    logs.forEach(l=>l.uploadedAt=now);
+    persistTourState();
+    renderLogList();
+    finishProgress(`${logs.length} Entwurf/Entwürfe hochgeladen.`);
+    showToast(`${logs.length} Log(s) als Entwürfe hochgeladen.${d.summary?" "+d.summary:""} Jetzt in der Geocaching-App oder auf geocaching.com unter „Entwürfe“ prüfen und abschicken.`,"success",10000);
+  }catch(e){
+    failProgress(e.message||String(e));
+    showToast(`Hochladen fehlgeschlagen: ${e.message||e}. Die Logs bleiben gespeichert.`,"error",9000);
+  }
+}
+
+function clearUploadedLogs(){
+  const n=state.pendingLogs.length-openLogs().length;
+  if(!n){showToast("Keine hochgeladenen Logs vorhanden.","warn",3000);return;}
+  state.pendingLogs=openLogs();
+  persistTourState();
+  renderLogList();
+}
+
+async function openDraftsPage(){
+  const url="https://www.geocaching.com/account/drafts";
+  if(isNativeApp()&&window.CR_NATIVE?.gcOpenPage){
+    try{await window.CR_NATIVE.gcOpenPage(url,"Entwürfe");return;}catch(e){}
+  }
+  window.open(url,"_blank");
 }
 
 async function sendQueuedLogs(){
@@ -2433,7 +2585,8 @@ function loadTourState(){
   if(!Array.isArray(state.savedTours))state.savedTours=[];
   if(!Array.isArray(state.savedTrips))state.savedTrips=[];
   if(!Array.isArray(state.pendingLogs))state.pendingLogs=[];
-  updateLogQueueStatus();
+  state.pendingLogs=state.pendingLogs.filter(l=>l&&l.cacheId).map(normalizePendingLog);
+  renderLogList();
   renderSavedTours();
   renderSavedTrips();
   renderActiveTour();
@@ -3086,10 +3239,11 @@ function cachePopupHtml(cache,index=null){
 }
 
 window.cacheRundeLog=(cacheId,type)=>{
-  $("#logCacheSelect").value=cacheId;
-  $("#logType").value=type;
-  switchTab("ich");
-  $("#logText")?.focus();
+  const dup=openLogs().find(l=>l.cacheId===cacheId&&l.type===type);
+  if(dup&&!confirm(`Für ${cacheId} ist schon ein Log „${LOG_TYPE_LABELS[type]||type}“ vorgemerkt. Noch einen anlegen?`))return;
+  addPendingLog(cacheId,type);
+  try{state.map?.closePopup();}catch(e){}
+  showToast(`${cacheId}: „${LOG_TYPE_LABELS[type]||type}“ um ${new Date().toLocaleTimeString("de-DE",{hour:"2-digit",minute:"2-digit"})} vorgemerkt. Text kannst du unter „Ich“ → Logbuch ergänzen.`,"success",5000);
 };
 
 window.cacheRundeDone=(cacheId)=>markCacheCompleted(cacheId);
@@ -4643,7 +4797,18 @@ bindOptional("#recalcLocalStats","click",refreshPersonalStats);
 bindOptional("#connectGc","click",connectGeocaching);
 bindOptional("#syncGc","click",syncGeocaching);
 bindOptional("#queueLog","click",queueLog);
-bindOptional("#sendLogs","click",sendQueuedLogs);
+bindOptional("#sendLogs","click",uploadLogsAsDrafts);
+bindOptional("#exportLogs","click",exportFieldNotes);
+bindOptional("#clearUploadedLogs","click",clearUploadedLogs);
+bindOptional("#openDrafts","click",openDraftsPage);
+bindOptional("#logList","click",onLogListEvent);
+bindOptional("#logList","change",onLogListEvent);
+bindOptional("#logList","input",onLogListEvent);
+setTimeout(()=>{try{
+  const native=isNativeApp();
+  $("#sendLogs").textContent=native?"Als Entwürfe hochladen":"Als Feldnotiz-Datei speichern";
+  $("#exportLogs")?.classList.toggle("hidden",!native);
+}catch(e){}},300);
 bindOptional("#disconnectGc","click",disconnectGeocaching);
 
 bindOptional("#tripSearchBtn","click",searchTripOrigin);

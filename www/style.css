@@ -230,3 +230,12 @@ button{min-height:42px}
 .provider-status-bad{color:#9b1c1c;font-weight:700}
 
 .profile-resolve-note{margin-top:6px;font-size:11px;color:var(--muted)}
+
+/* Logbuch der Tour (0.15.0) */
+.log-list{display:flex;flex-direction:column;gap:8px}
+.log-item{border:1px solid #d7e3dc;border-radius:12px;padding:10px;background:#fff}
+.log-item.log-uploaded{opacity:.6;background:#f4f7f5}
+.log-head{font-size:14px;margin-bottom:6px;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.log-row{display:flex;gap:8px;margin-bottom:6px}
+.log-row select{flex:1}
+.log-text{width:100%;box-sizing:border-box}

@@ -15,9 +15,9 @@
   <header class="topbar">
     <div>
       <div class="brand">CacheRunde</div>
-      <div class="subtitle">Prototype 0.14.3 · Echtrouting</div>
+      <div class="subtitle">Prototype 0.15.0 · Echtrouting</div>
     </div>
-    <div style="display:flex;gap:8px;align-items:center"><span class="pill" style="background:#fff;color:#0d4f37">Build 0.14.3</span><div class="top-status">
+    <div style="display:flex;gap:8px;align-items:center"><span class="pill" style="background:#fff;color:#0d4f37">Build 0.15.0</span><div class="top-status">
           <span id="networkBadge" class="status-chip">Netz: …</span>
           <span id="offlineBadge" class="status-chip">Offline: …</span>
         </div>
@@ -32,7 +32,7 @@
   <div id="progressText" class="progress-text">Bereit.</div>
 </div>
 <div style="background:#fff3cd;color:#664d03;border-bottom:1px solid #ffecb5;padding:8px 18px;text-align:center;font-weight:800">
-  TESTBUILD 0.14.3 · Android-App · Cache-Suche über geocaching.com</div>
+  TESTBUILD 0.15.0 · Logbuch der Tour · Entwürfe hochladen</div>
 
   <div id="toast" class="toast hidden"></div>
 
@@ -550,7 +550,7 @@
 
       <div class="card">
         <h2>Geocaching Provider</h2>
-        <p class="muted">0.14.3 enthält einen realistischen Test Provider für Profil, Funde, Mystery-Finals und Logs. Er nutzt lokale Test-/GPX-Daten und kann später gegen eine autorisierte Schnittstelle ausgetauscht werden.</p>
+        <p class="muted">0.15.0 enthält einen realistischen Test Provider für Profil, Funde, Mystery-Finals und Logs. Er nutzt lokale Test-/GPX-Daten und kann später gegen eine autorisierte Schnittstelle ausgetauscht werden.</p>
         <div class="form-grid">
           <label>Provider
             <select id="gcProvider">
@@ -573,25 +573,33 @@
       </div>
 
       <div class="card">
-        <h2>Logging testen</h2>
+        <h2>Logbuch der Tour <span id="logCountBadge" class="pill hidden">0</span></h2>
+        <p class="muted">Logs unterwegs sammeln – am einfachsten über „Found it“, „DNF“ oder „Notiz“ im Cache-Fenster auf der Karte. Datum und Uhrzeit werden sofort gespeichert. Am Ende alles auf einmal als <strong>Entwürfe</strong> hochladen und in der Geocaching-App oder auf geocaching.com prüfen und abschicken.</p>
         <div class="form-grid">
           <label>Cache
             <select id="logCacheSelect"></select>
           </label>
           <label>Logtyp
             <select id="logType">
-              <option value="Found it">Found it</option>
-              <option value="Didn't find it">Didn't find it</option>
-              <option value="Write note">Write note</option>
+              <option value="Found it">Gefunden</option>
+              <option value="Didn't find it">Nicht gefunden</option>
+              <option value="Write note">Notiz</option>
+              <option value="Needs Maintenance">Wartung nötig</option>
             </select>
           </label>
-          <label class="span2">Logtext
-            <textarea id="logText" rows="4" placeholder="Logtext …"></textarea>
+          <label class="span2">Logtext (optional)
+            <textarea id="logText" rows="3" placeholder="Logtext …"></textarea>
           </label>
-          <button id="queueLog" class="primary">Log vormerken</button>
-          <button id="sendLogs" class="ghost">Vorgemerkte Logs senden</button>
+          <button id="queueLog" class="ghost span2">Log vormerken</button>
         </div>
-        <div id="logQueueStatus" class="muted" style="margin-top:10px">Keine Logs vorgemerkt.</div>
+        <div id="logQueueStatus" class="muted" style="margin:10px 0">Noch keine Logs auf dieser Tour.</div>
+        <div id="logList" class="log-list"></div>
+        <div class="data-actions" style="margin-top:10px">
+          <button id="sendLogs" class="primary">Als Entwürfe hochladen</button>
+          <button id="exportLogs" class="ghost hidden">Als Datei speichern</button>
+          <button id="openDrafts" class="ghost">Entwürfe auf geocaching.com öffnen</button>
+          <button id="clearUploadedLogs" class="ghost">Hochgeladene ausblenden</button>
+        </div>
       </div>
 
       <div class="card">

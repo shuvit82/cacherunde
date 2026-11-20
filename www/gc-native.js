@@ -80,7 +80,7 @@
 
   async function gcLogin(){
     const IAB=await browserPlugin();
-    if(!IAB)return {ok:false,message:`In-App-Browser nicht verfügbar [0.14.3 · ${lastPluginInfo}]`};
+    if(!IAB)return {ok:false,message:`In-App-Browser nicht verfügbar [0.15.0 · ${lastPluginInfo}]`};
     try{await IAB.removeAllListeners();}catch(e){}
     let closedByUs=false;
     try{
@@ -104,7 +104,7 @@
         toolbarType:"compact"
       });
     }catch(e){
-      return {ok:false,message:`Anmeldefenster ließ sich nicht öffnen: ${e&&e.message||e} [0.14.3 · ${lastPluginInfo}]`};
+      return {ok:false,message:`Anmeldefenster ließ sich nicht öffnen: ${e&&e.message||e} [0.15.0 · ${lastPluginInfo}]`};
     }
     return {ok:true,browser:"In-App-Browser"};
   }
@@ -229,5 +229,57 @@
     }catch(e){return {message:e.message};}
   }
 
-  window.CR_NATIVE={gcLogin,gcStats,gcSearch,gcProfileName};
+  /* ---------- Entwürfe (Field Notes) hochladen ---------- */
+
+  function utf16le(str){
+    const out=new Uint8Array(2+str.length*2);
+    out[0]=0xFF;out[1]=0xFE;
+    for(let i=0;i<str.length;i++){const c=str.charCodeAt(i);out[2+2*i]=c&255;out[3+2*i]=c>>8;}
+    return out;
+  }
+
+  async function gcUploadDrafts(text){
+    if(!text||!text.trim())return {ok:false,message:"Keine Logs."};
+    const file=new File([utf16le(text)],"geocache_visits.txt",{type:"text/plain"});
+    const fd=new FormData();
+    fd.append("file-0",file);
+    let r,body="";
+    try{
+      r=await fetch(`${GC}/api/proxy/web/v1/LogDrafts/upload`,{
+        method:"POST",
+        headers:{"Accept":"application/json, text/javascript, */*; q=0.01","X-Requested-With":"XMLHttpRequest"},
+        body:fd
+      });
+      body=await r.text();
+    }catch(e){
+      return {ok:false,message:"Netzwerkfehler: "+(e.message||e)};
+    }
+    if(r.status===401||r.status===403||/account\/signin/i.test(body)&&!/^\s*[\[{]/.test(body)){
+      return {ok:false,loginRequired:true,message:"Nicht bei geocaching.com angemeldet."};
+    }
+    if(!r.ok){
+      return {ok:false,message:`geocaching.com meldet HTTP ${r.status}: ${body.slice(0,200)}`};
+    }
+    let data=null,summary="";
+    try{data=JSON.parse(body);}catch(e){}
+    if(data&&typeof data==="object"){
+      const n=["successCount","SuccessCount","uploadedCount","count","Count"].map(k=>data[k]).find(v=>typeof v==="number");
+      if(typeof n==="number")summary=`geocaching.com bestätigt ${n}.`;
+      const err=data.errorMessage||data.ErrorMessage||data.message||data.Message;
+      if(data.success===false||data.Success===false)return {ok:false,message:err||"geocaching.com hat den Upload abgelehnt.",response:data};
+    }
+    return {ok:true,status:r.status,summary,response:data??body.slice(0,300)};
+  }
+
+  /* ---------- Seite von geocaching.com im In-App-Browser zeigen ---------- */
+
+  async function gcOpenPage(url,title){
+    const IAB=await browserPlugin();
+    if(!IAB)throw new Error("In-App-Browser nicht verfügbar");
+    try{await IAB.removeAllListeners();}catch(e){}
+    await IAB.openWebView({url,title:title||"geocaching.com",toolbarType:"compact"});
+    return {ok:true};
+  }
+
+  window.CR_NATIVE={gcLogin,gcStats,gcSearch,gcProfileName,gcUploadDrafts,gcOpenPage};
 })();

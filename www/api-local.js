@@ -11,7 +11,7 @@
 (function(){
   "use strict";
 
-  const VERSION="0.14.3";
+  const VERSION="0.15.0";
   const TILE_CACHE="cacherunde-tiles";
   const nativeFetch=window.fetch.bind(window);
 
@@ -393,6 +393,15 @@
     async "/api/geocaching-profile-public"(q){
       if(native()&&native().gcProfileName)return json(await native().gcProfileName(q.get("url")));
       return json({message:notInBrowser("Das Auslesen des Profilnamens")},501);
+    },
+
+    async "/api/gc-drafts-upload"(q,init){
+      let o={};try{o=JSON.parse(await readBody(init)||"{}");}catch(e){}
+      if(native()&&native().gcUploadDrafts){
+        try{return json(await native().gcUploadDrafts(o.text||""));}
+        catch(e){return json({ok:false,message:e.message||String(e)},502);}
+      }
+      return json({ok:false,message:"Das direkte Hochladen geht nur in der Android-App. Im Browser: Datei speichern und auf geocaching.com hochladen."});
     },
 
     async "/api/gc-search"(q){
