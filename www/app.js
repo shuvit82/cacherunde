@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.17.1";
+const APP_VERSION="0.18.0";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -4234,6 +4234,11 @@ async function loadCachesFromGeocaching(){
     return;
   }
   const radius=+($("#quickRadius")?.value||10);
+  // Auswahl "die X nächsten Caches" (seit 0.18.0): großer Suchradius, nach Entfernung sortiert, danach kürzen
+  const countSel=$("#gcCount")?.value||"all";
+  const nearestN=countSel==="all"?0:Math.max(1,parseInt(countSel,10)||0);
+  const searchRadius=nearestN?50:radius;
+  const maxFetch=nearestN?Math.min(1000,Math.ceil(nearestN*1.3/50)*50):1000;
   const onProgress=e=>{
     const {loaded,total}=e.detail||{};
     const pct=total?Math.min(90,10+Math.round(80*loaded/total)):30;
@@ -4241,8 +4246,8 @@ async function loadCachesFromGeocaching(){
   };
   window.addEventListener("cr-gc-search-progress",onProgress);
   try{
-    setProgress(5,`Suche Caches im Umkreis von ${radius} km …`,"geocaching.com");
-    const r=await fetch(`/api/gc-search?lat=${center.lat}&lon=${center.lon}&radius=${radius}&hideFound=1&max=1000`,{cache:"no-store"});
+    setProgress(5,nearestN?`Suche die ${nearestN} nächsten Caches …`:`Suche Caches im Umkreis von ${radius} km …`,"geocaching.com");
+    const r=await fetch(`/api/gc-search?lat=${center.lat}&lon=${center.lon}&radius=${searchRadius}&hideFound=1&max=${maxFetch}`,{cache:"no-store"});
     const d=await r.json();
     if(!d.ok){
       if(d.loginRequired){
@@ -4253,22 +4258,32 @@ async function loadCachesFromGeocaching(){
       throw new Error(d.message||"Suche fehlgeschlagen");
     }
     const me=(d.user||"").toLowerCase();
-    const caches=(d.results||[])
+    let caches=(d.results||[])
       .filter(x=>x.status===0)
       .filter(x=>!GC_EVENT_TYPES.has(x.type))
       .filter(x=>!(me&&x.owner&&x.owner.toLowerCase()===me))
       .map(gcResultToCache)
       .filter(c=>Number.isFinite(c.lat)&&Number.isFinite(c.lon));
+    let farthestKm=0;
+    if(nearestN){
+      caches.sort((a,b)=>haversine(center,a)-haversine(center,b));
+      caches=caches.slice(0,nearestN);
+      farthestKm=caches.length?haversine(center,caches[caches.length-1]):0;
+    }
     const mysteries=caches.filter(c=>c.type==="Mystery");
     const solved=mysteries.filter(c=>c.corrected).length;
     const save={loadedAt:new Date().toISOString(),center,radius,user:d.user,total:d.total,truncated:!!d.truncated,caches};
     try{localStorage.setItem(GC_CACHE_KEY,JSON.stringify(save));}catch(e){}
-    const status=`${caches.length} Caches von geocaching.com · ${radius} km`;
+    const status=nearestN
+      ? `${caches.length} nächste Caches von geocaching.com · bis ${farthestKm.toFixed(1)} km`
+      : `${caches.length} Caches von geocaching.com · ${radius} km`;
     applyLoadedCaches(caches,status);
     finishProgress(`${caches.length} Caches geladen.`);
     showToast(
       `${caches.length} Caches geladen (ohne gefundene, deaktivierte und Events). Mysterys mit gelöstem Final: ${solved} von ${mysteries.length}.`+
-      (d.truncated?` Achtung: auf 1000 von ${d.total} begrenzt – Radius verkleinern.`:""),
+      (nearestN
+        ? ` Der entfernteste liegt ${farthestKm.toFixed(1)} km entfernt.`+(farthestKm>radius?` Für die Planung zählt dein Suchradius von ${radius} km – ggf. erhöhen.`:"")
+        : (d.truncated?` Achtung: auf 1000 von ${d.total} begrenzt – Radius verkleinern.`:"")),
       "success",8000
     );
   }catch(e){
@@ -5033,6 +5048,8 @@ bindOptional("#openProjectGcStats","click",openProjectGcStats);
 bindOptional("#gcLoginBtn","click",gcLogin);
 bindOptional("#gcLoginBtnData","click",gcLogin);
 bindOptional("#gcLoadCaches","click",gcSearchByPlace);
+bindOptional("#gcCount","change",()=>{try{localStorage.setItem("cacherunde-gc-count",$("#gcCount").value);}catch(e){}});
+try{const gcN=localStorage.getItem("cacherunde-gc-count");if(gcN&&$("#gcCount"))$("#gcCount").value=gcN;}catch(e){}
 bindOptional("#gcSearchPlace","keydown",e=>{if(e.key==="Enter"){e.preventDefault();gcSearchByPlace();}});
 bindOptional("#gcSearchPlace","focus",updateGcCenterLabel);
 setInterval(()=>{try{updateGcCenterLabel();}catch(e){}},3000);

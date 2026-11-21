@@ -2,7 +2,7 @@
  * - App-Dateien: zuerst Netz (damit Updates sofort ankommen), offline aus dem Cache
  * - Kartenkacheln und Leaflet: zuerst Cache, sonst Netz (und dann speichern)
  */
-const VERSION="0.17.1";
+const VERSION="0.18.0";
 const APP_CACHE="cacherunde-app-"+VERSION;
 const TILE_CACHE="cacherunde-tiles";
 const LIB_CACHE="cacherunde-libs";
