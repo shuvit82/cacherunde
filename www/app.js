@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.16.0";
+const APP_VERSION="0.17.0";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -314,6 +314,12 @@ function makeRouteFromSeed(seed,component,graph,opts,variant=0){
   return path;
 }
 
+/* Zu-Fuß-Modus (seit 0.17.0): kein Parkplatz, Runde beginnt und endet am Ausgangspunkt. */
+function isWalkFromStart(opts){return (opts&&opts.parkingMode)==="none";}
+function walkStartPoint(opts){
+  return {lat:opts.start.lat,lon:opts.start.lon,name:"Dein Standort (zu Fuß)",parkingScore:null,fee:"",capacity:0,walkStart:true};
+}
+
 function buildRoutes(opts){
   const candidates=filteredCaches(opts);
   $("#miniCandidateCount").textContent=candidates.length;
@@ -365,8 +371,22 @@ function buildRoutes(opts){
           lat:cycle.reduce((s,c)=>s+c.lat,0)/cycle.length,
           lon:cycle.reduce((s,c)=>s+c.lon,0)/cycle.length
         };
-        const dist=haversine(opts.start,centroid);
+        let dist=haversine(opts.start,centroid);
+        let walkFromStart=false;
+        if(isWalkFromStart(opts)){
+          // Hin- und Rückweg vom Standort grob schätzen (Luftlinie × 1,3, beide Richtungen)
+          const nearest=Math.min(...cycle.map(c=>haversine(opts.start,c)));
+          const accessKm=nearest*1.3*2;
+          const accessMin=accessKm/opts.speed*60;
+          stats.km=+(stats.km+accessKm).toFixed(2);
+          stats.totalMin=Math.round(stats.totalMin+accessMin);
+          stats.accessKm=+accessKm.toFixed(2);
+          if(stats.totalMin>opts.maxTime*1.05) continue;
+          dist=nearest;
+          walkFromStart=true;
+        }
         routes.push({
+          walkFromStart,
           id:`r-${routes.length}-${Date.now()}`,
           name:["Beste Runde","Cache-Kompakt","Wald & Panorama","Feierabendrunde","Höhenrunde"][routes.length%5],
           points:cycle,
@@ -450,7 +470,8 @@ function routeQualityScore(route){
   const usefulLength=Math.min(12,Math.max(0,s.km))*0.35;
   const violations=(route.real?.violations ?? route.precheck?.violations ?? 0);
   const overlap=(route.real?.overlapRatio ?? route.precheck?.overlapRatio ?? 0);
-  return rate*10 + sizeBonus + usefulLength - violations*18 - overlap*8;
+  const accessPenalty=route.walkFromStart?Math.max(0,(route.startDistance||0)-0.3)*10:0;
+  return rate*10 + sizeBonus + usefulLength - violations*18 - overlap*8 - accessPenalty;
 }
 
 function sortRoutes(routes, mode="quality"){
@@ -1369,7 +1390,9 @@ async function refineRoute(route,button){
       if(status) status.textContent="Manuell gewählten Parkplatz prüfen …";
     }else{
       try{
-        const parkingPromise=findParkingCandidates(finalSeq[0],finalSeq[finalSeq.length-1],finalSeq,opts.parkingMode||"fallback");
+        const parkingPromise=isWalkFromStart(opts)
+          ? Promise.resolve([walkStartPoint(opts)])
+          : findParkingCandidates(finalSeq[0],finalSeq[finalSeq.length-1],finalSeq,opts.parkingMode||"fallback");
         const timeoutPromise=new Promise((_,reject)=>setTimeout(()=>reject(new Error("timeout")),10000));
         parkings=await Promise.race([parkingPromise,timeoutPromise]);
         if(pre?.parking && !pre.parking.previewFallback){
@@ -1460,7 +1483,7 @@ async function refineRoute(route,button){
     routingStage="Anfahrt berechnen";
     setProgress(65,"Hin- und Rückweg zum Parkplatz werden berechnet …","Echtroute");
     let drive=null;
-    try{drive=await carRoute(opts.start,parking);}catch(e){}
+    if(!isWalkFromStart(opts)){try{drive=await carRoute(opts.start,parking);}catch(e){}}
 
     const walkingDistance=(toFirst?.distance||0)+(cacheReal?.distance||0)+(fromLast?.distance||0);
     const walkingDuration=(toFirst?.duration||0)+(cacheReal?.duration||0)+(fromLast?.duration||0);
@@ -1630,7 +1653,7 @@ function renderRoutes(container, routes, sortMode="distance"){
         ? `<span class="pill real-badge">${getOpts(false).maxGap}-Min.-Regel ✓</span>`
         : `<span class="pill warn-badge">${r.real.violations} Überschreitung(en)</span>`;
       node.querySelector(".cache-line").innerHTML=
-        `${ruleTxt}<div class="real-details"><strong>🅿 ${r.real.parking?.name||"Startpunkt"}</strong><br>`+
+        `${ruleTxt}<div class="real-details"><strong>${r.real.parking?.walkStart?"🚶":"🅿"} ${r.real.parking?.name||"Startpunkt"}</strong><br>`+
         `Echte Wanderstrecke: ${(r.real.walkingDistance/1000).toFixed(1)} km · `+
         `max. Cache→Cache: ${fmtMin(r.real.maxCacheLegSec/60)}${driveTxt}<br>`+
         `${r.real.parkingAutomatic
@@ -2047,7 +2070,7 @@ function showRouteOnMap(r){
     L.polyline(latlngs,{weight:5}).addTo(state.layers.route);
     if(validRoutingPoint(r.real?.parking)){
       L.marker([r.real.parking.lat,r.real.parking.lon],{title:"Parkplatz"})
-        .bindPopup(`<strong>🅿 ${r.real.parking?.name||"Startpunkt"}</strong><br>Start und Ende der Wanderung${r.real.parking?.roadside?`<br><strong>⚠ Straßenrand-Fallback:</strong> Beschilderung und örtliche Parkregeln prüfen.`:""}`)
+        .bindPopup(`<strong>${r.real.parking?.walkStart?"🚶":"🅿"} ${r.real.parking?.name||"Startpunkt"}</strong><br>Start und Ende der Wanderung${r.real.parking?.roadside?`<br><strong>⚠ Straßenrand-Fallback:</strong> Beschilderung und örtliche Parkregeln prüfen.`:""}`)
         .addTo(state.layers.route);
     }
   }else{
@@ -2856,9 +2879,9 @@ async function precheckCandidateRoute(route,opts){
     let parkings=[];
     let parking=null;
     try{
-      const parkingPromise=findParkingCandidates(
-        finalSeq[0],finalSeq[finalSeq.length-1],finalSeq,opts.parkingMode||"fallback"
-      );
+      const parkingPromise=isWalkFromStart(opts)
+        ? Promise.resolve([walkStartPoint(opts)])
+        : findParkingCandidates(finalSeq[0],finalSeq[finalSeq.length-1],finalSeq,opts.parkingMode||"fallback");
       const timeoutPromise=new Promise((_,reject)=>setTimeout(()=>reject(new Error("preview-parking-timeout")),8500));
       parkings=await Promise.race([parkingPromise,timeoutPromise]);
       parking=parkings?.[0]||null;
@@ -4909,6 +4932,17 @@ bindOptional("#originLocationBtn","click",useCurrentLocation);
 bindOptional("#originMapBtn","click",enableMapOriginPick);
 bindOptional("#originCacheAreaBtn","click",useCacheAreaOrigin);
 bindOptional("#useLocation","click",useCurrentLocation);
+for(const [a,b] of [["#quickParkingMode","#parkingMode"],["#parkingMode","#quickParkingMode"]]){
+  bindOptional(a,"change",()=>{
+    const v=$(a).value;
+    if($(b)&&$(b).value!==v)$(b).value=v;
+    try{localStorage.setItem("cacherunde-parking-mode",v);}catch(e){}
+  });
+}
+try{
+  const pm=localStorage.getItem("cacherunde-parking-mode");
+  if(pm){["#quickParkingMode","#parkingMode"].forEach(id=>{if($(id))$(id).value=pm;});}
+}catch(e){}
 setTimeout(()=>{try{autoLocateOrigin();}catch(e){console.warn(e);}},600);
 bindOptional("#mapPlanNew","click",()=>startMapPlanner(false));
 bindOptional("#mapPlanEdit","click",()=>{

@@ -15,9 +15,9 @@
   <header class="topbar">
     <div>
       <div class="brand">CacheRunde</div>
-      <div class="subtitle">Prototype 0.16.0 · Echtrouting</div>
+      <div class="subtitle">Prototype 0.17.0 · Echtrouting</div>
     </div>
-    <div style="display:flex;gap:8px;align-items:center"><span class="pill" style="background:#fff;color:#0d4f37">Build 0.16.0</span><div class="top-status">
+    <div style="display:flex;gap:8px;align-items:center"><span class="pill" style="background:#fff;color:#0d4f37">Build 0.17.0</span><div class="top-status">
           <span id="networkBadge" class="status-chip">Netz: …</span>
           <span id="offlineBadge" class="status-chip">Offline: …</span>
         </div>
@@ -32,7 +32,7 @@
   <div id="progressText" class="progress-text">Bereit.</div>
 </div>
 <div style="background:#fff3cd;color:#664d03;border-bottom:1px solid #ffecb5;padding:8px 18px;text-align:center;font-weight:800">
-  TESTBUILD 0.16.0 · Logbuch · Adventure-Lab-Stationen</div>
+  TESTBUILD 0.17.0 · Zu Fuß ab Standort</div>
 
   <div id="toast" class="toast hidden"></div>
 
@@ -82,6 +82,7 @@
             <option value="designated">Nur ausgewiesene Parkplätze</option>
             <option value="fallback" selected>Parkplatz bevorzugen · Straßenrand als Fallback</option>
             <option value="roadside">Straßenrand mitprüfen</option>
+            <option value="none">Kein Parkplatz nötig · zu Fuß ab Standort</option>
           </select>
         </label>
         <label>Suchradius
@@ -162,6 +163,7 @@
               <option value="designated">Nur ausgewiesene Parkplätze</option>
               <option value="fallback" selected>Parkplatz bevorzugen · Straßenrand als Fallback</option>
               <option value="roadside">Straßenrand mitprüfen</option>
+            <option value="none">Kein Parkplatz nötig · zu Fuß ab Standort</option>
             </select>
           </label>
           <label>Mindestzahl Caches
@@ -563,7 +565,7 @@
 
       <div class="card">
         <h2>Geocaching Provider</h2>
-        <p class="muted">0.16.0 enthält einen realistischen Test Provider für Profil, Funde, Mystery-Finals und Logs. Er nutzt lokale Test-/GPX-Daten und kann später gegen eine autorisierte Schnittstelle ausgetauscht werden.</p>
+        <p class="muted">0.17.0 enthält einen realistischen Test Provider für Profil, Funde, Mystery-Finals und Logs. Er nutzt lokale Test-/GPX-Daten und kann später gegen eine autorisierte Schnittstelle ausgetauscht werden.</p>
         <div class="form-grid">
           <label>Provider
             <select id="gcProvider">
