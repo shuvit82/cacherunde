@@ -80,7 +80,7 @@
 
   async function gcLogin(){
     const IAB=await browserPlugin();
-    if(!IAB)return {ok:false,message:`In-App-Browser nicht verfügbar [0.17.0 · ${lastPluginInfo}]`};
+    if(!IAB)return {ok:false,message:`In-App-Browser nicht verfügbar [0.17.1 · ${lastPluginInfo}]`};
     try{await IAB.removeAllListeners();}catch(e){}
     let closedByUs=false;
     try{
@@ -104,7 +104,7 @@
         toolbarType:"compact"
       });
     }catch(e){
-      return {ok:false,message:`Anmeldefenster ließ sich nicht öffnen: ${e&&e.message||e} [0.17.0 · ${lastPluginInfo}]`};
+      return {ok:false,message:`Anmeldefenster ließ sich nicht öffnen: ${e&&e.message||e} [0.17.1 · ${lastPluginInfo}]`};
     }
     return {ok:true,browser:"In-App-Browser"};
   }

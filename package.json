@@ -1,6 +1,6 @@
 {
   "name": "cacherunde",
-  "version": "0.17.0",
+  "version": "0.17.1",
   "private": true,
   "description": "Geocaching-Rundenfinder – Web-App und Android-App (Capacitor)",
   "scripts": {

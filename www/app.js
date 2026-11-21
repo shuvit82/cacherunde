@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.17.0";
+const APP_VERSION="0.17.1";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -4279,6 +4279,46 @@ async function loadCachesFromGeocaching(){
   }
 }
 
+/* Adresse/Ort als Mittelpunkt für die geocaching.com-Suche (seit 0.17.1) */
+async function gcSearchByPlace(){
+  const q=($("#gcSearchPlace")?.value||"").trim();
+  const host=$("#gcPlaceMatches");
+  if(!q){loadCachesFromGeocaching();return;}
+  if(host)host.innerHTML='<div class="muted">Suche Adresse …</div>';
+  try{
+    const c=planningCenter();
+    const bias=c?`&lat=${c.lat}&lon=${c.lon}`:"";
+    const res=await fetch(`/api/geocode?q=${encodeURIComponent(q)}&limit=6${bias}`,{cache:"no-store"});
+    const items=(await res.json()).results||[];
+    if(!items.length){if(host)host.innerHTML='<div class="muted">Keine Treffer. Ort, Straße mit Ort oder PLZ versuchen.</div>';return;}
+    const pick=item=>{
+      if(host)host.innerHTML="";
+      setOrigin(+item.lat,+item.lon,item.display_name||item.name);
+      $("#gcSearchPlace").value=item.name||q;
+      loadCachesFromGeocaching();
+    };
+    if(items.length===1){pick(items[0]);return;}
+    host.innerHTML='<div class="muted">Welcher Ort ist gemeint?</div>';
+    items.forEach(item=>{
+      const b=document.createElement("button");
+      b.type="button";b.className="origin-match";
+      b.textContent=item.display_name||item.name;
+      b.onclick=()=>pick(item);
+      host.appendChild(b);
+    });
+  }catch(e){
+    if(host)host.innerHTML='<div class="muted">Adresssuche nicht erreichbar.</div>';
+  }
+}
+
+function updateGcCenterLabel(){
+  const el=$("#gcCenterLabel");
+  if(!el)return;
+  const c=planningCenter();
+  const name=($("#originStatus")?.textContent||"").replace(/^Ausgangspunkt:\s*/,"");
+  el.textContent=c?`Ohne Eingabe wird um den Ausgangspunkt gesucht: ${name||`${c.lat.toFixed(4)}, ${c.lon.toFixed(4)}`}`:"Noch kein Ausgangspunkt gewählt.";
+}
+
 function restoreGcCaches(){
   try{
     const s=JSON.parse(localStorage.getItem(GC_CACHE_KEY)||"null");
@@ -4292,6 +4332,7 @@ function restoreGcCaches(){
 function initGcSearchUi(){
   const native=isNativeApp();
   $("#gcLoadCaches")?.classList.toggle("hidden",!native);
+  $("#gcPlaceBox")?.classList.toggle("hidden",!native);
   $("#gcLoginBtnData")?.classList.toggle("hidden",!native);
   restoreGcCaches();
   if(loadLabStations().length)syncLabsIntoCaches();
@@ -4991,7 +5032,10 @@ bindOptional("#testYearStats","click",testYearStats);
 bindOptional("#openProjectGcStats","click",openProjectGcStats);
 bindOptional("#gcLoginBtn","click",gcLogin);
 bindOptional("#gcLoginBtnData","click",gcLogin);
-bindOptional("#gcLoadCaches","click",loadCachesFromGeocaching);
+bindOptional("#gcLoadCaches","click",gcSearchByPlace);
+bindOptional("#gcSearchPlace","keydown",e=>{if(e.key==="Enter"){e.preventDefault();gcSearchByPlace();}});
+bindOptional("#gcSearchPlace","focus",updateGcCenterLabel);
+setInterval(()=>{try{updateGcCenterLabel();}catch(e){}},3000);
 bindOptional("#labAddMap","click",startLabPick);
 bindOptional("#labAddMapData","click",startLabPick);
 bindOptional("#labAddCoords","click",addLabByCoordinates);
