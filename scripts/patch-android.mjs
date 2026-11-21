@@ -23,7 +23,12 @@ edit(path.join(appDir, "src", "main", "AndroidManifest.xml"), xml => {
     "android.permission.ACCESS_FINE_LOCATION",
   ].filter(p => !xml.includes(p))
    .map(p => `    <uses-permission android:name="${p}" />`).join("\n");
-  return perms ? xml.replace(/<\/manifest>\s*$/, `${perms}\n</manifest>\n`) : xml;
+  if (perms) xml = xml.replace(/<\/manifest>\s*$/, `${perms}\n</manifest>\n`);
+  // Android 11+: Adventure-Lab-App muss sichtbar sein, damit sie per Paketname geöffnet werden kann
+  if (!xml.includes("com.groundspeak.react.adventures")) {
+    xml = xml.replace(/<\/manifest>\s*$/, `    <queries>\n        <package android:name="com.groundspeak.react.adventures" />\n    </queries>\n</manifest>\n`);
+  }
+  return xml;
 });
 
 // 2) Version und Signierung

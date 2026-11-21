@@ -15,9 +15,9 @@
   <header class="topbar">
     <div>
       <div class="brand">CacheRunde</div>
-      <div class="subtitle">Prototype 0.15.0 · Echtrouting</div>
+      <div class="subtitle">Prototype 0.16.0 · Echtrouting</div>
     </div>
-    <div style="display:flex;gap:8px;align-items:center"><span class="pill" style="background:#fff;color:#0d4f37">Build 0.15.0</span><div class="top-status">
+    <div style="display:flex;gap:8px;align-items:center"><span class="pill" style="background:#fff;color:#0d4f37">Build 0.16.0</span><div class="top-status">
           <span id="networkBadge" class="status-chip">Netz: …</span>
           <span id="offlineBadge" class="status-chip">Offline: …</span>
         </div>
@@ -32,7 +32,7 @@
   <div id="progressText" class="progress-text">Bereit.</div>
 </div>
 <div style="background:#fff3cd;color:#664d03;border-bottom:1px solid #ffecb5;padding:8px 18px;text-align:center;font-weight:800">
-  TESTBUILD 0.15.0 · Logbuch der Tour · Entwürfe hochladen</div>
+  TESTBUILD 0.16.0 · Logbuch · Adventure-Lab-Stationen</div>
 
   <div id="toast" class="toast hidden"></div>
 
@@ -119,6 +119,17 @@
           <button id="useLocation" class="ghost">Standort verwenden</button>
         </div>
         <p class="muted">In der App lädt „Caches von geocaching.com laden“ alle noch nicht gefundenen Caches um den Ausgangspunkt im gewählten Suchradius – inklusive deiner korrigierten Mystery-Koordinaten. Die Liste bleibt auf dem Gerät gespeichert und ist unterwegs auch offline verfügbar.</p>
+        <div class="stats-source-box">
+          <strong>Adventure Lab</strong>
+          <p class="muted">Lab-Stationen sind auf geocaching.com nicht abrufbar. Setze sie hier von Hand – sie werden dann wie Caches in die Runde eingeplant. Geloggt wird in der Adventure-Lab-App.</p>
+          <div class="data-actions">
+            <button id="labAddMapData" class="ghost">Auf der Karte setzen</button>
+            <button id="labAddCoords" class="ghost">Per Koordinaten</button>
+            <button id="labOpenApp" class="ghost">Adventure-Lab-App öffnen</button>
+            <button id="labClear" class="ghost">Alle Lab-Stationen löschen</button>
+          </div>
+          <div id="labStatus" class="muted" style="margin-top:6px">Noch keine Lab-Stationen.</div>
+        </div>
         <p class="muted">Mysterys werden nur berücksichtigt, wenn im GPX eine Final-/Corrected-Markierung erkannt wird. Gefundene Caches und Multis werden standardmäßig ausgeschlossen.</p>
       </div>
 
@@ -198,6 +209,7 @@
           <label class="toggle-row"><input id="tradis" type="checkbox" checked/> Tradis</label>
           <label class="toggle-row"><input id="mysteries" type="checkbox" checked/> Mystery nur mit Final</label>
           <label class="toggle-row"><input id="multis" type="checkbox"/> Multis</label>
+          <label class="toggle-row"><input id="labs" type="checkbox" checked/> Lab-Stationen</label>
           <label>Sortieren nach
             <select id="sortBy">
               <option value="quality" selected>Qualität</option>
@@ -370,6 +382,7 @@
       <div class="map-toolbar">
         <button id="fitMap" class="ghost">Alles anzeigen</button>
         <button id="mapPlanNew" class="primary">Freie Planung</button>
+        <button id="labAddMap" class="ghost">＋ Lab-Station</button>
         <button id="mapPlanEdit" class="ghost">Aktuelle Route gesammelt bearbeiten</button>
         <button id="mapMoveParking" class="ghost">Parkplatz setzen / verschieben</button>
         <button id="offlineCurrent" class="ghost">Kartenausschnitt offline speichern</button>
@@ -550,7 +563,7 @@
 
       <div class="card">
         <h2>Geocaching Provider</h2>
-        <p class="muted">0.15.0 enthält einen realistischen Test Provider für Profil, Funde, Mystery-Finals und Logs. Er nutzt lokale Test-/GPX-Daten und kann später gegen eine autorisierte Schnittstelle ausgetauscht werden.</p>
+        <p class="muted">0.16.0 enthält einen realistischen Test Provider für Profil, Funde, Mystery-Finals und Logs. Er nutzt lokale Test-/GPX-Daten und kann später gegen eine autorisierte Schnittstelle ausgetauscht werden.</p>
         <div class="form-grid">
           <label>Provider
             <select id="gcProvider">

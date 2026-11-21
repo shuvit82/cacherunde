@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.15.0";
+const APP_VERSION="0.16.0";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -212,7 +212,8 @@ function filteredCaches(opts){
     if(c.type==="Traditional" && !opts.tradis) return false;
     if(c.type==="Multi" && !opts.multis) return false;
     if(c.type==="Mystery" && (!opts.mysteries || !c.corrected)) return false;
-    if(!["Traditional","Mystery","Multi"].includes(c.type)) return false;
+    if(c.type==="Lab" && opts.labs===false) return false;
+    if(!["Traditional","Mystery","Multi","Lab"].includes(c.type)) return false;
     return true;
   });
 }
@@ -424,13 +425,13 @@ function getOpts(quick=false){
   const start={lat:parseFloat($("#startLat").value),lon:parseFloat($("#startLon").value),ele:null};
   return quick ? {
     start, radius:+$("#quickRadius").value, maxGap:+$("#quickGap").value, maxTime:+$("#quickMaxTime").value,
-    speed:4.5, stopTime:5, excludeFound:true, tradis:true, mysteries:true, multis:false,
+    speed:4.5, stopTime:5, excludeFound:true, tradis:true, mysteries:true, multis:false, labs:true,
     minCaches:+($("#quickMinCaches")?.value||0),
     parkingMode:$("#quickParkingMode")?.value||"fallback"
   } : {
     start, radius:+$("#radius").value, maxGap:+$("#maxGap").value, maxTime:+$("#maxTime").value,
     speed:+$("#speed").value, stopTime:+$("#stopTime").value,
-    excludeFound:$("#excludeFound").checked, tradis:$("#tradis").checked,
+    excludeFound:$("#excludeFound").checked, tradis:$("#tradis").checked, labs:$("#labs")?$("#labs").checked:true,
     mysteries:$("#mysteries").checked, multis:$("#multis").checked,
     minCaches:+($("#minCaches")?.value||0),
     parkingMode:$("#parkingMode")?.value||"fallback"
@@ -1930,6 +1931,8 @@ function refreshCacheLayer(){
         ? "#b42318"
         : c.found
           ? "#87968f"
+          : c.type==="Lab"
+            ? "#d97706"
           : c.type==="Mystery"
             ? "#7c3aed"
             : c.type==="Multi"
@@ -2164,7 +2167,7 @@ async function loadGPXFile(file){
       }
     }
 
-    state.caches=parsed;
+    state.caches=mergeLabStations(parsed);
     setProgress(55,`${state.caches.length} Caches erkannt …`,"GPX-Import");
     const ignoredImportWaypoints=state.gpxImportStats?.ignoredWaypoints||0;
     $("#gpxStatus").textContent=ignoredImportWaypoints
@@ -2360,7 +2363,7 @@ function populateLogCacheSelect(){
   const sel=$("#logCacheSelect");
   if(!sel)return;
   sel.innerHTML="";
-  state.caches.slice(0,500).forEach(c=>{
+  state.caches.filter(c=>c.type!=="Lab").slice(0,500).forEach(c=>{
     const o=document.createElement("option");
     o.value=c.id;
     o.textContent=`${c.id} · ${c.name}`;
@@ -2750,7 +2753,7 @@ function cacheEligibleForManualRoute(cache){
   if(!cache || cache.found)return {ok:false,reason:"bereits gefunden"};
   if(cache.type==="Multi")return {ok:false,reason:"Multicache ist standardmäßig ausgeschlossen"};
   if(cache.type==="Mystery" && !cache.corrected)return {ok:false,reason:"Mystery ohne erkanntes Final"};
-  if(!["Traditional","Mystery"].includes(cache.type))return {ok:false,reason:"Cachetyp nicht für die Runde freigegeben"};
+  if(!["Traditional","Mystery","Lab"].includes(cache.type))return {ok:false,reason:"Cachetyp nicht für die Runde freigegeben"};
   return {ok:true,reason:""};
 }
 
@@ -3224,17 +3227,18 @@ function cachePopupHtml(cache,index=null){
 
   return `<div class="cache-detail-card">
     <strong>${index!=null?`${index+1}. `:""}${escapeHtml(cache.name)}</strong><br>
-    ${escapeHtml(cache.id)} · ${escapeHtml(cache.type)}<br>
-    D ${cache.difficulty??"—"} · T ${cache.terrain??"—"}<br>
+    ${cache.type==="Lab"
+      ? `Adventure-Lab-Station${cache.adventure?` · ${escapeHtml(cache.adventure)}`:""}<br><span class="muted">Loggen in der Adventure-Lab-App</span><br>`
+      : `${escapeHtml(cache.id)} · ${escapeHtml(cache.type)}<br>D ${cache.difficulty??"—"} · T ${cache.terrain??"—"}<br>`}
     ${cache.corrected?"Final vorhanden ✓":""}
     ${warning}
     ${routeEdit}
-    <div class="cache-detail-actions">
+    ${cache.type==="Lab"?labPopupActions(cache):`<div class="cache-detail-actions">
       <button onclick="window.cacheRundeLog('${safeId}','Found it')">Found it</button>
       <button onclick="window.cacheRundeLog('${safeId}','Didn\\'t find it')">DNF</button>
       <button onclick="window.cacheRundeLog('${safeId}','Write note')">Notiz</button>
       <button onclick="window.cacheRundeDone('${safeId}')">${isDone?"Erledigt ✓":"Als erledigt markieren"}</button>
-    </div>
+    </div>`}
   </div>`;
 }
 
@@ -3584,7 +3588,7 @@ async function optimizeTripCandidate(route,origin,tripOpts,idx,total){
   const routeOpts={
     start:{lat:origin.lat,lon:origin.lon,ele:null},
     radius:tripOpts.radius,maxGap:15,maxTime:tripOpts.maxWalk,
-    speed:4.5,stopTime:5,excludeFound:true,tradis:true,mysteries:true,multis:false,minCaches:tripOpts.minCaches
+    speed:4.5,stopTime:5,excludeFound:true,tradis:true,mysteries:true,multis:false,labs:true,minCaches:tripOpts.minCaches
   };
 
   try{
@@ -4178,7 +4182,7 @@ function gcResultToCache(r){
 }
 
 function applyLoadedCaches(caches,statusText){
-  state.caches=caches;
+  state.caches=mergeLabStations(caches);
   $("#gpxStatus").textContent=statusText;
   $("#miniCacheCount").textContent=caches.length;
   if(caches.length){
@@ -4267,7 +4271,180 @@ function initGcSearchUi(){
   $("#gcLoadCaches")?.classList.toggle("hidden",!native);
   $("#gcLoginBtnData")?.classList.toggle("hidden",!native);
   restoreGcCaches();
+  if(loadLabStations().length)syncLabsIntoCaches();
+  updateLabStatus();
 }
+
+/* ---- Adventure-Lab-Stationen (seit 0.16.0) ----
+   Lab-Caches sind nicht über geocaching.com abrufbar. Stationen werden daher von Hand
+   gesetzt (Tipp auf die Karte oder Koordinaten) und wie normale Caches mitgeplant.
+   Geloggt wird in der Adventure-Lab-App. */
+
+const LAB_KEY="cacherunde-lab-stations";
+const LAB_APP_PACKAGE="com.groundspeak.react.adventures";
+
+function loadLabStations(){
+  try{
+    const l=JSON.parse(localStorage.getItem(LAB_KEY)||"[]");
+    return Array.isArray(l)?l.filter(c=>c&&Number.isFinite(+c.lat)&&Number.isFinite(+c.lon)):[];
+  }catch(e){return [];}
+}
+function saveLabStations(list){
+  try{localStorage.setItem(LAB_KEY,JSON.stringify(list));}catch(e){}
+  updateLabStatus();
+}
+function mergeLabStations(list){
+  return [...(list||[]).filter(c=>c.type!=="Lab"),...loadLabStations()];
+}
+function syncLabsIntoCaches(){
+  state.caches=mergeLabStations(state.caches);
+  $("#miniCacheCount")&&($("#miniCacheCount").textContent=state.caches.length);
+  refreshCacheLayer();
+  populateLogCacheSelect();
+  updateLabStatus();
+}
+function updateLabStatus(){
+  const el=$("#labStatus");
+  if(!el)return;
+  const labs=loadLabStations();
+  const open=labs.filter(l=>!l.found).length;
+  el.textContent=labs.length
+    ? `${labs.length} Lab-Station(en) gespeichert, davon ${open} offen.`
+    : "Noch keine Lab-Stationen. Koordinaten siehst du als Premium-Mitglied in der Adventure-Lab-App (Vorschau).";
+}
+
+/* Koordinaten in üblichen Schreibweisen lesen:
+   "N 49° 48.123 E 008° 51.234", "N49 48.123 E8 51.234", "49.80205, 8.85390", "49,80205 8,85390" */
+function parseCoordinates(input){
+  const s=String(input||"").trim().toUpperCase().replace(/[′’']/g," ").replace(/[°º]/g," ");
+  let m=/^([NS])\s*(\d{1,2})\s+(\d{1,2}(?:[.,]\d+)?)\s*[,;\s]\s*([EOW])\s*(\d{1,3})\s+(\d{1,2}(?:[.,]\d+)?)$/.exec(s);
+  if(m){
+    const f=x=>parseFloat(x.replace(",","."));
+    let lat=+m[2]+f(m[3])/60,lon=+m[5]+f(m[6])/60;
+    if(m[1]==="S")lat=-lat;
+    if(m[4]==="W")lon=-lon;
+    return valid(lat,lon);
+  }
+  m=/^([NS])?\s*(-?\d{1,2}[.,]\d+)\s*[,;\s]\s*([EOW])?\s*(-?\d{1,3}[.,]\d+)$/.exec(s);
+  if(m){
+    let lat=parseFloat(m[2].replace(",",".")),lon=parseFloat(m[4].replace(",","."));
+    if(m[1]==="S")lat=-Math.abs(lat);
+    if(m[3]==="W")lon=-Math.abs(lon);
+    return valid(lat,lon);
+  }
+  return null;
+  function valid(lat,lon){return Math.abs(lat)<=90&&Math.abs(lon)<=180?{lat,lon}:null;}
+}
+
+function createLabStation(lat,lon){
+  const labs=loadLabStations();
+  const lastAdventure=labs.length?labs[labs.length-1].adventure||"":"";
+  const name=prompt("Name der Lab-Station:",`Lab-Station ${labs.length+1}`);
+  if(name===null)return null;
+  const adventure=prompt("Name des Adventures (optional, für die Übersicht):",lastAdventure);
+  const station={
+    id:"LAB-"+Date.now().toString(36).toUpperCase(),
+    name:(name||"").trim()||`Lab-Station ${labs.length+1}`,
+    adventure:(adventure||"").trim(),
+    lat:+lat,lon:+lon,
+    type:"Lab",rawCacheType:"Lab Cache",
+    found:false,corrected:false,logs:[],ele:null,
+    difficulty:null,terrain:null,source:"manuell",
+    createdAt:new Date().toISOString()
+  };
+  labs.push(station);
+  saveLabStations(labs);
+  syncLabsIntoCaches();
+  showToast(`Lab-Station „${station.name}“ hinzugefügt. Sie wird bei der Planung wie ein Cache berücksichtigt.`,"success",5000);
+  return station;
+}
+
+function startLabPick(){
+  state.originPick=false;
+  state.parkingPickRoute=null;
+  state.labPick=true;
+  switchTab("karte");
+  $("#map")?.classList.add("map-pick-active");
+  showToast("Tippe auf der Karte auf die Position der Lab-Station.","success",5000);
+}
+
+function addLabByCoordinates(){
+  const txt=prompt("Koordinaten der Lab-Station (z. B. N 49° 48.123 E 008° 51.234):","");
+  if(txt===null)return;
+  const p=parseCoordinates(txt);
+  if(!p){alert("Diese Koordinaten konnte ich nicht lesen. Beispiel: N 49° 48.123 E 008° 51.234 oder 49.80205, 8.85390");return;}
+  const st=createLabStation(p.lat,p.lon);
+  if(st&&state.map)state.map.setView([st.lat,st.lon],Math.max(state.map.getZoom(),14));
+}
+
+function removeLabStation(id){
+  const labs=loadLabStations();
+  const st=labs.find(l=>l.id===id);
+  if(!st||!confirm(`Lab-Station „${st.name}“ löschen?`))return;
+  saveLabStations(labs.filter(l=>l.id!==id));
+  state.caches=state.caches.filter(c=>c.id!==id);
+  try{state.map?.closePopup();}catch(e){}
+  syncLabsIntoCaches();
+}
+
+function clearLabStations(){
+  const labs=loadLabStations();
+  if(!labs.length)return;
+  if(!confirm(`Alle ${labs.length} Lab-Station(en) löschen?`))return;
+  saveLabStations([]);
+  state.caches=state.caches.filter(c=>c.type!=="Lab");
+  syncLabsIntoCaches();
+}
+
+function markLabFound(id){
+  const labs=loadLabStations();
+  const st=labs.find(l=>l.id===id);
+  if(!st)return;
+  st.found=!st.found;
+  saveLabStations(labs);
+  const c=state.caches.find(x=>x.id===id);
+  if(c)c.found=st.found;
+  if(st.found)markCacheCompleted(id);
+  try{state.map?.closePopup();}catch(e){}
+  refreshCacheLayer();
+  showToast(st.found?`„${st.name}“ als gefunden markiert. Das Loggen selbst passiert in der Adventure-Lab-App.`:`„${st.name}“ wieder als offen markiert.`,"success",5000);
+}
+
+async function openAdventureLabApp(){
+  if(!isNativeApp()){
+    window.open("https://labs.geocaching.com/","_blank");
+    return;
+  }
+  const c=window.Capacitor||{};
+  let launcher=null;
+  try{launcher=(c.Plugins&&c.Plugins.AppLauncher)||(typeof c.registerPlugin==="function"?c.registerPlugin("AppLauncher"):null);}catch(e){}
+  if(!launcher&&typeof c.nativePromise==="function"){
+    launcher={openUrl:o=>c.nativePromise("AppLauncher","openUrl",o)};
+  }
+  try{
+    if(launcher){
+      const r=await launcher.openUrl({url:LAB_APP_PACKAGE});
+      if(!r||r.completed!==false)return;
+    }
+  }catch(e){
+    console.warn("Adventure-Lab-App ließ sich nicht direkt öffnen",e);
+  }
+  // Rückfall: Play-Store-Seite der App (dort „Öffnen“ bzw. „Installieren“)
+  location.href=`https://play.google.com/store/apps/details?id=${LAB_APP_PACKAGE}`;
+}
+
+function labPopupActions(cache){
+  const safeId=String(cache.id).replace(/'/g,"\\'");
+  return `<div class="cache-detail-actions">
+      <button onclick="window.cacheRundeOpenLabApp()">In Adventure Lab öffnen</button>
+      <button onclick="window.cacheRundeLabFound('${safeId}')">${cache.found?"Gefunden ✓ (zurücksetzen)":"Als gefunden markieren"}</button>
+      <button onclick="window.cacheRundeRemoveLab('${safeId}')">Station löschen</button>
+    </div>`;
+}
+
+window.cacheRundeOpenLabApp=()=>openAdventureLabApp();
+window.cacheRundeLabFound=id=>markLabFound(id);
+window.cacheRundeRemoveLab=id=>removeLabStation(id);
 
 function parseMyFindsGpx(text,username){
   const doc=new DOMParser().parseFromString(text,"application/xml");
@@ -4647,6 +4824,12 @@ window.addEventListener("beforeinstallprompt",e=>{
 try{
   initMap();
   state.map.on("click",e=>{
+    if(state.labPick){
+      state.labPick=false;
+      $("#map")?.classList.remove("map-pick-active");
+      createLabStation(e.latlng.lat,e.latlng.lng);
+      return;
+    }
     if(state.parkingPickRoute){
       const r=state.parkingPickRoute;
       const lockSequence=!!state.parkingPickLockSequence;
@@ -4699,7 +4882,7 @@ bindOptional("#loadDemo","click",async()=>{
   try{
     const r=await fetch("sample.gpx");
     const t=await r.text();
-    state.caches=parseGPX(t);
+    state.caches=mergeLabStations(parseGPX(t));
     const ignoredDemoWaypoints=state.gpxImportStats?.ignoredWaypoints||0;
     $("#gpxStatus").textContent=ignoredDemoWaypoints
       ? `${state.caches.length} Demo-Caches · ${ignoredDemoWaypoints} Zusatzwegpunkt(e) ignoriert`
@@ -4775,6 +4958,11 @@ bindOptional("#openProjectGcStats","click",openProjectGcStats);
 bindOptional("#gcLoginBtn","click",gcLogin);
 bindOptional("#gcLoginBtnData","click",gcLogin);
 bindOptional("#gcLoadCaches","click",loadCachesFromGeocaching);
+bindOptional("#labAddMap","click",startLabPick);
+bindOptional("#labAddMapData","click",startLabPick);
+bindOptional("#labAddCoords","click",addLabByCoordinates);
+bindOptional("#labClear","click",clearLabStations);
+bindOptional("#labOpenApp","click",openAdventureLabApp);
 window.addEventListener("cr-gc-login-closed",()=>{
   showToast("Anmeldefenster geschlossen. Lade Statistik neu …","success",3000);
   try{testYearStats();}catch(e){}
