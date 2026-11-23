@@ -249,3 +249,8 @@ button{min-height:42px}
 .gc-detail-list>div{display:flex;justify-content:space-between;gap:10px;border-bottom:1px dashed #d7e3dc;padding:4px 0;font-size:14px}
 .gc-detail-list span{color:#557}
 .gc-detail-list strong{text-align:right}
+
+/* Gemeinsamer Suchort (0.20.1) */
+.place-card{display:flex;flex-direction:column;gap:6px;position:relative}
+.place-card .search-row{display:flex;gap:8px}
+.place-card .search-row input{flex:1}

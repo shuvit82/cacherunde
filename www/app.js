@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.20.0";
+const APP_VERSION="0.20.1";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -2236,11 +2236,25 @@ async function loadGPXFile(file){
   }
 }
 
+const ORIGIN_KEY="cacherunde-origin";
 function setOrigin(lat,lon,label="Gewählter Punkt",explicit=true){
   $("#startLat").value=Number(lat).toFixed(6);
   $("#startLon").value=Number(lon).toFixed(6);
   $("#originStatus").textContent=`Ausgangspunkt: ${label}`;
   if(explicit)state.originExplicit=true;
+  // Ein gemeinsamer Suchort für Tourensuche und geocaching.com (seit 0.20.1)
+  const isDevice=/^Mein Standort/.test(label);
+  try{
+    if(explicit&&isDevice)localStorage.removeItem(ORIGIN_KEY);
+    else if(explicit)localStorage.setItem(ORIGIN_KEY,JSON.stringify({lat:+lat,lon:+lon,label}));
+  }catch(e){}
+  const ps=$("#placeStatus");
+  if(ps)ps.textContent=isDevice?`Suchort: dein Standort`:`Suchort: ${label}`;
+  const short=isDevice?"":String(label).split(",")[0];
+  for(const id of ["#gcSearchPlace","#originSearch"]){
+    const el=$(id);
+    if(el&&document.activeElement!==el)el.value=short;
+  }
   if(state.map && typeof L!=="undefined"){
     state.map.setView([lat,lon],13);
     if(state.originMarker)state.map.removeLayer(state.originMarker);
@@ -2264,7 +2278,7 @@ async function searchOrigin(){
     items.forEach(item=>{
       const b=document.createElement("button");b.type="button";b.className="origin-match";
       b.textContent=item.display_name||item.name;
-      b.onclick=()=>{setOrigin(+item.lat,+item.lon,item.display_name||item.name);host.innerHTML=""};
+      b.onclick=()=>{pickSearchPlace(item);host.innerHTML=""};
       host.appendChild(b);
     });
   }catch(e){
@@ -2290,7 +2304,19 @@ function useCurrentLocation(){
 }
 
 // Beim Start den aktuellen Standort als Ausgangspunkt übernehmen (still, ohne Fehlermeldung).
+function restoreSavedOrigin(){
+  try{
+    const o=JSON.parse(localStorage.getItem(ORIGIN_KEY)||"null");
+    if(o&&Number.isFinite(+o.lat)&&Number.isFinite(+o.lon)){
+      setOrigin(+o.lat,+o.lon,o.label||"Gewählter Ort");
+      return true;
+    }
+  }catch(e){}
+  return false;
+}
+
 function autoLocateOrigin(){
+  if(restoreSavedOrigin())return;
   if(!navigator.geolocation||state.originExplicit)return;
   $("#originStatus").textContent="Ausgangspunkt: Standort wird ermittelt …";
   navigator.geolocation.getCurrentPosition(pos=>{
@@ -3414,11 +3440,23 @@ const suggestOrigin=debounce(async()=>{
   }
   const items=await fetchLocationSuggestions(q);
   renderLocationSuggestions("#originSuggestions",items,item=>{
-    $("#originSearch").value=item.display_name||item.name||q;
-    setOrigin(+item.lat,+item.lon,item.name||item.display_name||"Gewählter Ort");
+    pickSearchPlace(item);
     switchTab("touren");
   });
 },350);
+
+// Gewählter Ort gilt für alles: Tourensuche, Detailsuche und (in der App) das Laden von geocaching.com
+function pickSearchPlace(item){
+  const label=item.display_name||item.name||"Gewählter Ort";
+  setOrigin(+item.lat,+item.lon,label);
+  if(isNativeApp()){
+    const loadedAt=(()=>{try{return JSON.parse(localStorage.getItem(GC_CACHE_KEY)||"null")?.center;}catch(e){return null;}})();
+    const far=!loadedAt||haversine(loadedAt,{lat:+item.lat,lon:+item.lon})>1;
+    if(far)loadCachesFromGeocaching();
+  }else{
+    showToast(`Suchort: ${String(label).split(",")[0]}. Die Tourensuche plant jetzt um diesen Ort.`,"success",4000);
+  }
+}
 
 const suggestGcPlace=debounce(async()=>{
   const q=$("#gcSearchPlace")?.value||"";
@@ -3429,10 +3467,8 @@ const suggestGcPlace=debounce(async()=>{
   const items=await fetchLocationSuggestions(q);
   if(($("#gcSearchPlace")?.value||"")!==q)return; // inzwischen weitergetippt
   renderLocationSuggestions("#gcSuggestions",items,item=>{
-    $("#gcSearchPlace").value=item.name||item.display_name||q;
     $("#gcPlaceMatches").innerHTML="";
-    setOrigin(+item.lat,+item.lon,item.display_name||item.name||q);
-    loadCachesFromGeocaching();
+    pickSearchPlace(item);
   });
 },300);
 
@@ -4314,7 +4350,7 @@ async function loadCachesFromGeocaching(){
 async function gcSearchByPlace(){
   const q=($("#gcSearchPlace")?.value||"").trim();
   const host=$("#gcPlaceMatches");
-  if(!q){loadCachesFromGeocaching();return;}
+  if(!q){useCurrentLocation();return;}
   if(host)host.innerHTML='<div class="muted">Suche Adresse …</div>';
   try{
     const c=planningCenter();
@@ -4324,9 +4360,7 @@ async function gcSearchByPlace(){
     if(!items.length){if(host)host.innerHTML='<div class="muted">Keine Treffer. Ort, Straße mit Ort oder PLZ versuchen.</div>';return;}
     const pick=item=>{
       if(host)host.innerHTML="";
-      setOrigin(+item.lat,+item.lon,item.display_name||item.name);
-      $("#gcSearchPlace").value=item.name||q;
-      loadCachesFromGeocaching();
+      pickSearchPlace(item);
     };
     if(items.length===1){pick(items[0]);return;}
     host.innerHTML='<div class="muted">Welcher Ort ist gemeint?</div>';
@@ -4347,7 +4381,7 @@ function updateGcCenterLabel(){
   if(!el)return;
   const c=planningCenter();
   const name=($("#originStatus")?.textContent||"").replace(/^Ausgangspunkt:\s*/,"");
-  el.textContent=c?`Ohne Eingabe wird um den Ausgangspunkt gesucht: ${name||`${c.lat.toFixed(4)}, ${c.lon.toFixed(4)}`}`:"Noch kein Ausgangspunkt gewählt.";
+  el.textContent=c?`Caches werden um den Suchort geladen: ${name||`${c.lat.toFixed(4)}, ${c.lon.toFixed(4)}`}`:"Noch kein Suchort gewählt.";
 }
 
 function restoreGcCaches(){
@@ -5200,7 +5234,8 @@ bindOptional("#testYearStats","click",testYearStats);
 bindOptional("#openProjectGcStats","click",openProjectGcStats);
 bindOptional("#gcLoginBtn","click",gcLogin);
 bindOptional("#gcLoginBtnData","click",gcLogin);
-bindOptional("#gcLoadCaches","click",gcSearchByPlace);
+bindOptional("#gcLoadCaches","click",loadCachesFromGeocaching);
+bindOptional("#placeUseLocation","click",()=>{ $("#gcSearchPlace").value=""; $("#gcPlaceMatches").innerHTML=""; useCurrentLocation(); });
 bindOptional("#checkUpdate","click",()=>checkForUpdate(true));
 setTimeout(()=>{try{initUpdateUi();}catch(e){console.warn(e);}},500);
 bindOptional("#gcCount","change",()=>{try{localStorage.setItem("cacherunde-gc-count",$("#gcCount").value);}catch(e){}});
