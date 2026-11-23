@@ -15,9 +15,9 @@
   <header class="topbar">
     <div>
       <div class="brand">CacheRunde</div>
-      <div class="subtitle">Prototype 0.19.0 · Echtrouting</div>
+      <div class="subtitle">Prototype 0.20.0 · Echtrouting</div>
     </div>
-    <div style="display:flex;gap:8px;align-items:center"><span id="buildPill" class="pill" style="background:#fff;color:#0d4f37">Build 0.19.0</span><div class="top-status">
+    <div style="display:flex;gap:8px;align-items:center"><span id="buildPill" class="pill" style="background:#fff;color:#0d4f37">Build 0.20.0</span><div class="top-status">
           <span id="networkBadge" class="status-chip">Netz: …</span>
           <span id="offlineBadge" class="status-chip">Offline: …</span>
         </div>
@@ -32,7 +32,7 @@
   <div id="progressText" class="progress-text">Bereit.</div>
 </div>
 <div style="background:#fff3cd;color:#664d03;border-bottom:1px solid #ffecb5;padding:8px 18px;text-align:center;font-weight:800">
-  TESTBUILD 0.19.0 · Update-Prüfung</div>
+  TESTBUILD 0.20.0 · Vorschläge ab 3 Buchstaben · Statistik von geocaching.com</div>
 
   <div id="toast" class="toast hidden"></div>
 
@@ -115,6 +115,7 @@
         <div class="data-actions">
           <div id="gcPlaceBox" class="span2 hidden" style="width:100%">
             <div class="search-row"><input id="gcSearchPlace" type="search" placeholder="Ort oder Adresse (leer = Ausgangspunkt)" autocomplete="off"/></div>
+            <div id="gcSuggestions" class="search-suggestions hidden"></div>
             <label style="display:block;margin:6px 0">Wie viele Caches?
               <select id="gcCount">
                 <option value="all" selected>Alle im Suchradius (max. 1000)</option>
@@ -440,6 +441,7 @@
           <div><strong id="statEuropeRank">—</strong><span>Europa</span></div>
           <div><strong id="statGermanyRank">—</strong><span>Deutschland</span></div>
         </div>
+        <div id="gcStatDetails"></div>
         <div class="form-grid" style="margin-top:14px">
           <label>Geocaching-Benutzername
             <input id="gcUsername" type="text" placeholder="Dein Benutzername"/>
@@ -581,7 +583,7 @@
 
       <div class="card">
         <h2>Geocaching Provider</h2>
-        <p class="muted">0.19.0 enthält einen realistischen Test Provider für Profil, Funde, Mystery-Finals und Logs. Er nutzt lokale Test-/GPX-Daten und kann später gegen eine autorisierte Schnittstelle ausgetauscht werden.</p>
+        <p class="muted">0.20.0 enthält einen realistischen Test Provider für Profil, Funde, Mystery-Finals und Logs. Er nutzt lokale Test-/GPX-Daten und kann später gegen eine autorisierte Schnittstelle ausgetauscht werden.</p>
         <div class="form-grid">
           <label>Provider
             <select id="gcProvider">

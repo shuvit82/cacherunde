@@ -80,7 +80,7 @@
 
   async function gcLogin(){
     const IAB=await browserPlugin();
-    if(!IAB)return {ok:false,message:`In-App-Browser nicht verfügbar [0.19.0 · ${lastPluginInfo}]`};
+    if(!IAB)return {ok:false,message:`In-App-Browser nicht verfügbar [0.20.0 · ${lastPluginInfo}]`};
     try{await IAB.removeAllListeners();}catch(e){}
     let closedByUs=false;
     try{
@@ -104,7 +104,7 @@
         toolbarType:"compact"
       });
     }catch(e){
-      return {ok:false,message:`Anmeldefenster ließ sich nicht öffnen: ${e&&e.message||e} [0.19.0 · ${lastPluginInfo}]`};
+      return {ok:false,message:`Anmeldefenster ließ sich nicht öffnen: ${e&&e.message||e} [0.20.0 · ${lastPluginInfo}]`};
     }
     return {ok:true,browser:"In-App-Browser"};
   }
@@ -131,6 +131,16 @@
       }
       out.yearly.sort((a,b)=>a.year-b.year);
     }
+    out.details=[];
+    for(const row of doc.querySelectorAll(".ProfileDataRow, dl > div")){
+      const dt=row.querySelector("dt"),dd=row.querySelector("dd");
+      if(!dt||!dd)continue;
+      const label=dt.textContent.replace(/\s+/g," ").trim();
+      const value=dd.textContent.replace(/\s+/g," ").trim();
+      if(label&&value&&!out.details.some(d=>d.label===label))out.details.push({label,value});
+    }
+    const basicPs=[...doc.querySelectorAll("#BasicFinds p")].map(p=>p.textContent.replace(/\s+/g," ").trim()).filter(Boolean);
+    if(basicPs[1])out.habit=basicPs[1];
     const strong=doc.querySelectorAll("#BasicFinds strong");
     if(strong[0])out.totalFinds=parseInt(strong[0].textContent.replace(/\D/g,""),10)||null;
     if(strong[1])out.firstFind=strong[1].textContent.trim();
@@ -156,7 +166,7 @@
       const {html}=await getHtml(url);
       const p=parseStats(html);
       if(p.yearly.length){
-        const save={url,totalFinds:p.totalFinds,firstFind:p.firstFind,yearly:p.yearly,savedAt:Date.now()};
+        const save={url,totalFinds:p.totalFinds,firstFind:p.firstFind,yearly:p.yearly,details:p.details||[],habit:p.habit||null,savedAt:Date.now()};
         try{localStorage.setItem(STATS_KEY,JSON.stringify(save));}catch(e){}
         return {...p,available:true,cached:false,message:"Live von geocaching.com abgerufen."};
       }
@@ -281,5 +291,148 @@
     return {ok:true};
   }
 
-  window.CR_NATIVE={gcLogin,gcStats,gcSearch,gcProfileName,gcUploadDrafts,gcOpenPage};
+  /* ---------- Cacherstats-Ranglisten ---------- */
+
+  const CS="https://www.cacherstats.com/cgi-bin/";
+  const CS_CACHE="cacherunde-cacherstats-cache";
+
+  function csChallenge(html){
+    return !html||/please wait while your request is being verified|checking your browser|challenge-platform|cf-chl|enable javascript and cookies/i.test(html);
+  }
+  function plainText(html){
+    const d=new DOMParser().parseFromString(html||"","text/html");
+    d.querySelectorAll("script,style").forEach(n=>n.remove());
+    return (d.body?d.body.textContent:"").replace(/\s+/g," ").trim();
+  }
+  async function csGet(url){
+    const r=await fetch(url,{headers:{"Accept":"text/html","Accept-Language":"en-US,en;q=0.8,de;q=0.6"}});
+    return {status:r.status,html:await r.text(),url};
+  }
+
+  // Formular auf der Seite finden und mit dem Benutzernamen (bzw. GUID) ausfüllen.
+  async function csSubmitForm(pageUrl,html,username,guid){
+    const doc=new DOMParser().parseFromString(html,"text/html");
+    const forms=[...doc.querySelectorAll("form")];
+    const textInputs=f=>[...f.querySelectorAll("input")].filter(i=>["text","search",""].includes((i.getAttribute("type")||"").toLowerCase()));
+    const form=forms.find(f=>/cacher|name/i.test(f.textContent)&&textInputs(f).length)||forms.find(f=>textInputs(f).length);
+    if(!form)return {error:"kein Suchformular gefunden",fields:[]};
+    const params=new URLSearchParams();
+    for(const el of form.querySelectorAll("input,select")){
+      const name=el.getAttribute("name");
+      if(!name)continue;
+      const type=(el.getAttribute("type")||"").toLowerCase();
+      if(["submit","button","image","reset"].includes(type))continue;
+      if((type==="checkbox"||type==="radio")&&!el.hasAttribute("checked"))continue;
+      let value=el.tagName==="SELECT"?(el.querySelector("option[selected]")||el.querySelector("option"))?.getAttribute("value")||"":el.getAttribute("value")||"";
+      params.set(name,value);
+    }
+    const inputs=textInputs(form);
+    const guidField=inputs.find(i=>/guid/i.test(i.name));
+    const nameField=inputs.find(i=>/cacher|name|user/i.test(i.name)&&!/guid/i.test(i.name))||inputs.find(i=>!/guid/i.test(i.name))||inputs[0];
+    if(nameField)params.set(nameField.name,username);
+    if(guid&&guidField)params.set(guidField.name,guid);
+    for(const lang of ["Lang","Language"])if(params.has(lang))params.set(lang,"EN");
+    const submit=form.querySelector("input[type=submit][name],button[type=submit][name]");
+    if(submit)params.set(submit.getAttribute("name"),submit.getAttribute("value")||"");
+    const action=new URL(form.getAttribute("action")||pageUrl,pageUrl).toString();
+    const method=(form.getAttribute("method")||"get").toUpperCase();
+    const fields=[...params.keys()];
+    const r=method==="POST"
+      ? await fetch(action,{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded","Accept":"text/html"},body:params.toString()})
+      : await fetch(action+(action.includes("?")?"&":"?")+params.toString(),{headers:{"Accept":"text/html"}});
+    return {html:await r.text(),status:r.status,fields,method,action,nameField:nameField&&nameField.name};
+  }
+
+  const LOC_KEYS={World:"worldRank",Welt:"worldRank",Europe:"europeRank",Europa:"europeRank",Germany:"germanyRank",Deutschland:"germanyRank"};
+  function parseLocations(html){
+    const out={};
+    // Links wie RankingList.pl?...Loc=Germany...&RANK=52364
+    const re=/RankingList\.pl\?[^"'<>\s]*?Loc=([^&"'<>\s]+)[^"'<>\s]*?(?:RANK|Rank|rank|ROW|Row)=([0-9]+)/g;
+    let m;
+    while((m=re.exec(html))){
+      const loc=decodeURIComponent(m[1].replace(/\+/g," "));
+      const key=LOC_KEYS[loc];
+      if(key&&!out[key])out[key]=+m[2];
+    }
+    // Tabellenzeilen: "World | 123,456" usw.
+    const doc=new DOMParser().parseFromString(html,"text/html");
+    for(const tr of doc.querySelectorAll("tr")){
+      const cells=[...tr.querySelectorAll("td,th")].map(c=>c.textContent.replace(/\s+/g," ").trim());
+      const locIdx=cells.findIndex(c=>LOC_KEYS[c]);
+      if(locIdx<0)continue;
+      const key=LOC_KEYS[cells[locIdx]];
+      if(out[key])continue;
+      const num=cells.slice(locIdx+1).map(c=>c.replace(/[.,\s]/g,"")).find(c=>/^#?\d{1,9}$/.test(c));
+      if(num)out[key]=+num.replace("#","");
+    }
+    const t=plainText(html);
+    const f=/Total\s+Finds\s*:?\s*([0-9][0-9,.]*)/i.exec(t);
+    if(f)out.finds=+f[1].replace(/\D/g,"");
+    return out;
+  }
+
+  // Rangliste einer Region nach dem Namen durchsuchen (Rückfall)
+  async function csRankingList(loc,username){
+    const base=`${CS}RankingList.pl?Lang=EN&Loc=${encodeURIComponent(loc)}&ROW=1`;
+    const page=await csGet(base);
+    if(csChallenge(page.html))return {blocked:true};
+    const scan=html=>{
+      const doc=new DOMParser().parseFromString(html,"text/html");
+      for(const tr of doc.querySelectorAll("tr")){
+        const hit=[...tr.querySelectorAll("a")].some(a=>a.textContent.trim().toLowerCase()===username.toLowerCase());
+        if(!hit)continue;
+        const nums=[...tr.querySelectorAll("td")].map(td=>td.textContent.replace(/[.,\s]/g,"")).filter(x=>/^\d{1,9}$/.test(x)).map(Number);
+        if(nums.length>=2)return {rank:nums[0],finds:nums[nums.length>2?2:1]};
+      }
+      return null;
+    };
+    let hit=scan(page.html);
+    if(hit)return hit;
+    const sub=await csSubmitForm(base,page.html,username,null).catch(()=>null);
+    if(sub&&sub.html&&!csChallenge(sub.html))hit=scan(sub.html);
+    return hit||{};
+  }
+
+  async function cacherstats(q){
+    const user=String(q.get("user")||"").trim();
+    if(!user)return {matched:false,message:"Kein Cacherstats-Benutzername hinterlegt."};
+    const force=q.get("force")==="1";
+    try{
+      const c=JSON.parse(localStorage.getItem(CS_CACHE)||"null");
+      const ageDays=c?(Date.now()-c.savedAt)/86400000:Infinity;
+      if(!force&&c&&c.user===user&&ageDays<1)return {...c,matched:true,cached:true,cacheAgeDays:Math.floor(ageDays),sourceMethod:"Zwischenspeicher"};
+    }catch(e){}
+    const guidM=/[?&]guid=([0-9a-f-]{36})/i.exec(q.get("profileUrl")||"");
+    const guid=guidM?guidM[1]:null;
+    const debug=[];
+    let res={};
+    try{
+      const page=await csGet(`${CS}GeocacherLocations.pl`);
+      if(csChallenge(page.html))return {matched:false,blocked:true,message:"Cacherstats verlangt eine Browser-Prüfung."};
+      const sub=await csSubmitForm(page.url,page.html,user,guid);
+      debug.push(`Formular: ${sub.method||"?"} ${sub.action||""} Felder [${(sub.fields||[]).join(", ")}] Name→${sub.nameField||"?"}${sub.error?" ("+sub.error+")":""}`);
+      if(sub.html){
+        if(csChallenge(sub.html))return {matched:false,blocked:true,message:"Cacherstats verlangt eine Browser-Prüfung."};
+        res=parseLocations(sub.html);
+        if(!res.worldRank&&!res.germanyRank)debug.push("Antwort: "+plainText(sub.html).slice(0,300));
+      }
+    }catch(e){debug.push("GeocacherLocations: "+(e.message||e));}
+    let method="GeocacherLocations.pl";
+    for(const [loc,key] of [["Germany","germanyRank"],["World","worldRank"]]){
+      if(res[key])continue;
+      try{
+        const r=await csRankingList(loc,user);
+        if(r.blocked)return {matched:false,blocked:true,message:"Cacherstats verlangt eine Browser-Prüfung."};
+        if(r.rank){res[key]=r.rank;if(!res.finds&&r.finds)res.finds=r.finds;method+=` + RankingList ${loc}`;}
+      }catch(e){debug.push(`RankingList ${loc}: `+(e.message||e));}
+    }
+    const matched=!!(res.worldRank||res.germanyRank||res.europeRank);
+    if(!matched)return {matched:false,blocked:false,message:"Kein Treffer bei Cacherstats.",debug:debug.join(" | ")};
+    const out={name:user,user,worldRank:res.worldRank||null,europeRank:res.europeRank||null,germanyRank:res.germanyRank||null,
+      finds:res.finds||null,updated:new Date().toISOString().slice(0,10),savedAt:Date.now()};
+    try{localStorage.setItem(CS_CACHE,JSON.stringify(out));}catch(e){}
+    return {...out,matched:true,cached:false,sourceMethod:method,directLookup:method.startsWith("GeocacherLocations")};
+  }
+
+  window.CR_NATIVE={gcLogin,gcStats,gcSearch,gcProfileName,gcUploadDrafts,gcOpenPage,cacherstats};
 })();

@@ -243,3 +243,9 @@ button{min-height:42px}
 /* Update-Hinweis (0.19.0) */
 .update-banner{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:center;background:#e7f5ee;color:#0d4f37;border-bottom:1px solid #b7dcc8;padding:8px 14px;font-size:14px}
 .update-banner.hidden{display:none}
+
+/* Statistik von geocaching.com (0.20.0) */
+.gc-detail-list{display:grid;grid-template-columns:1fr;gap:4px}
+.gc-detail-list>div{display:flex;justify-content:space-between;gap:10px;border-bottom:1px dashed #d7e3dc;padding:4px 0;font-size:14px}
+.gc-detail-list span{color:#557}
+.gc-detail-list strong{text-align:right}

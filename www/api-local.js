@@ -11,7 +11,7 @@
 (function(){
   "use strict";
 
-  const VERSION="0.19.0";
+  const VERSION="0.20.0";
   const TILE_CACHE="cacherunde-tiles";
   const nativeFetch=window.fetch.bind(window);
 
@@ -193,6 +193,32 @@
         });
         return json({results});
       }catch(e){return text(e.message,502);}
+    },
+
+    // Vorschläge beim Tippen: Photon (für Suche während der Eingabe gedacht), sonst Nominatim
+    async "/api/suggest"(q){
+      const query=(q.get("q")||"").trim();
+      if(query.length<3)return json({results:[]});
+      const limit=q.get("limit")||"10";
+      const la=num(q.get("lat")),lo=num(q.get("lon"));
+      let url=`https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&limit=${encodeURIComponent(limit)}&lang=de`;
+      if(la!=null&&lo!=null)url+=`&lat=${la}&lon=${lo}`;
+      try{
+        const r=await fetchWithTimeout(url,{headers:{"Accept":"application/json"}},8000);
+        if(!r.ok)throw new Error("HTTP "+r.status);
+        const data=await r.json();
+        const results=(data.features||[]).map(f=>{
+          const p=f.properties||{},c=(f.geometry&&f.geometry.coordinates)||[];
+          const street=[p.street,p.housenumber].filter(Boolean).join(" ");
+          const place=[p.postcode,p.city||p.town||p.village||p.district].filter(Boolean).join(" ");
+          const name=p.name||street||place||p.county||"";
+          const parts=[name!==street?street:"",name!==place?place:"",p.state,p.country&&p.country!=="Deutschland"?p.country:""].filter(Boolean);
+          return {lat:c[1],lon:c[0],name,display_name:[name,...parts].filter(Boolean).join(", ")};
+        }).filter(x=>Number.isFinite(+x.lat)&&Number.isFinite(+x.lon)&&x.name);
+        return json({results,source:"photon"});
+      }catch(e){
+        return routes["/api/geocode"](q);
+      }
     },
 
     async "/api/parking"(q){

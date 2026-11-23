@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.19.0";
+const APP_VERSION="0.20.0";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -3367,12 +3367,12 @@ function sortSuggestionsByDistance(items,ref){
 }
 
 async function fetchLocationSuggestions(query){
-  if(!query || query.trim().length<4)return [];
+  if(!query || query.trim().length<3)return [];
   try{
     const ref=await getSearchReference();
-    const params=new URLSearchParams({q:query.trim(),limit:"10"});
+    const params=new URLSearchParams({q:query.trim(),limit:"12"});
     if(ref){params.set("lat",ref.lat);params.set("lon",ref.lon);}
-    const res=await fetch(`/api/geocode?${params.toString()}`,{cache:"no-store"});
+    const res=await fetch(`/api/suggest?${params.toString()}`,{cache:"no-store"});
     if(!res.ok)return [];
     const data=await res.json();
     return sortSuggestionsByDistance(data.results||[],ref);
@@ -3408,7 +3408,7 @@ function renderLocationSuggestions(hostId,items,onPick){
 
 const suggestOrigin=debounce(async()=>{
   const q=$("#originSearch")?.value||"";
-  if(q.trim().length<4){
+  if(q.trim().length<3){
     $("#originSuggestions")?.classList.add("hidden");
     return;
   }
@@ -3420,9 +3420,25 @@ const suggestOrigin=debounce(async()=>{
   });
 },350);
 
+const suggestGcPlace=debounce(async()=>{
+  const q=$("#gcSearchPlace")?.value||"";
+  if(q.trim().length<3){
+    $("#gcSuggestions")?.classList.add("hidden");
+    return;
+  }
+  const items=await fetchLocationSuggestions(q);
+  if(($("#gcSearchPlace")?.value||"")!==q)return; // inzwischen weitergetippt
+  renderLocationSuggestions("#gcSuggestions",items,item=>{
+    $("#gcSearchPlace").value=item.name||item.display_name||q;
+    $("#gcPlaceMatches").innerHTML="";
+    setOrigin(+item.lat,+item.lon,item.display_name||item.name||q);
+    loadCachesFromGeocaching();
+  });
+},300);
+
 const suggestTrip=debounce(async()=>{
   const q=$("#tripSearch")?.value||"";
-  if(q.trim().length<4){
+  if(q.trim().length<3){
     $("#tripSuggestions")?.classList.add("hidden");
     return;
   }
@@ -4912,7 +4928,7 @@ async function testCacherstatsLive(){
       setCacherstatsLiveStatus(`Cacherstats blockiert die automatische Abfrage${r.message?`: ${r.message}`:""}.`,"bad");
       failProgress("Cacherstats blockiert die Abfrage.");
     }else{
-      setCacherstatsLiveStatus(`Kein exakter Treffer für „${username}“.`,"warn");
+      setCacherstatsLiveStatus(`Kein Treffer für „${username}“.${r?.debug?` Diagnose: ${r.debug}`:""}`,"warn");
       finishProgress("Cacherstats erreichbar, aber kein exakter Treffer.");
     }
   }catch(e){
@@ -4926,6 +4942,39 @@ function openCacherstatsBrowser(){
   const base="https://www.cacherstats.com/cgi-bin/RankingList.pl?Lang=EN&Loc=Germany&ROW=1";
   const q=username?`&Name=${encodeURIComponent(username)}`:"";
   window.open(base+q,"_blank","noopener");
+}
+
+const GC_DETAIL_LABELS={
+  "Find Rate":"Fundrate","Longest Streak":"Längste Serie","Longest Slump":"Längste Pause",
+  "Current Streak":"Aktuelle Serie","Current Slump":"Aktuelle Pause","Best Day":"Bester Tag",
+  "Best Month":"Bester Monat","Best Year":"Bestes Jahr"
+};
+const EN_DE_WORDS={January:"Januar",February:"Februar",March:"März",April:"April",May:"Mai",June:"Juni",July:"Juli",August:"August",September:"September",October:"Oktober",November:"November",December:"Dezember",
+  Monday:"Montag",Tuesday:"Dienstag",Wednesday:"Mittwoch",Thursday:"Donnerstag",Friday:"Freitag",Saturday:"Samstag",Sunday:"Sonntag"};
+function deDatesAndNames(v){
+  return String(v)
+    .replace(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/g,(m,mo,d,y)=>`${d.padStart(2,"0")}.${mo.padStart(2,"0")}.${y}`)
+    .replace(/\b(January|February|March|April|May|June|July|August|September|October|November|December|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b/g,w=>EN_DE_WORDS[w]);
+}
+function translateGcHabit(v){
+  const m=/most caches in (\w+) and usually on (\w+)/i.exec(String(v||""));
+  return m?`Die meisten Funde im ${EN_DE_WORDS[m[1]]||m[1]}, meist an einem ${EN_DE_WORDS[m[2]]||m[2]}.`:String(v||"");
+}
+function translateGcDetail(v){
+  return deDatesAndNames(v)
+    .replace(/caches\/day/g,"Caches/Tag").replace(/consecutive days with finds/g,"Tage in Folge mit Funden")
+    .replace(/consecutive days without a find/g,"Tage in Folge ohne Fund").replace(/caches in one day on/g,"Caches an einem Tag, am")
+    .replace(/ caches in /g," Caches im ").replace(/ from /g," vom ").replace(/ to /g," bis ").replace(/ since /g," seit ").replace(/ of /g," ");
+}
+function renderGcStatDetails(detail){
+  const host=$("#gcStatDetails");
+  if(!host)return;
+  const d=detail&&(detail.details?detail:null);
+  if(!d||!d.details?.length){host.innerHTML="";return;}
+  const rows=d.details.map(x=>`<div><span>${escapeHtmlText(GC_DETAIL_LABELS[x.label]||x.label)}</span><strong>${escapeHtmlText(translateGcDetail(x.value))}</strong></div>`).join("");
+  const habit=d.habit?`<p class="muted" style="margin:6px 0 0">${escapeHtmlText(translateGcHabit(d.habit))}</p>`:"";
+  const first=d.firstFind?`<div><span>Erster Fund</span><strong>${escapeHtmlText(deDatesAndNames(d.firstFind))}</strong></div>`:"";
+  host.innerHTML=`<h3 style="margin:14px 0 6px;font-size:15px">Von geocaching.com</h3><div class="gc-detail-list">${first}${rows}</div>${habit}`;
 }
 
 async function refreshPersonalStats(){
@@ -4943,7 +4992,9 @@ async function refreshPersonalStats(){
   }
   const manual=state.manualStats||{};
 
-  const totalFinds=effectiveStat(ranks?.finds, effectiveStat(manual.totalFinds, local.total));
+  const gcTotal=String(yearStats?.source||"").startsWith("geocaching.com")?yearStats.totalFinds:null;
+  const totalFinds=effectiveStat(gcTotal,effectiveStat(ranks?.finds, effectiveStat(manual.totalFinds, local.total)));
+  renderGcStatDetails(yearStats?.detail);
   const resolvedYearSummary=summarizeYearlyStats(yearStats?.yearly||[]);
   const resolvedCurrentYear=yearStats?.yearly?.length?resolvedYearSummary.current:null;
   const yearFinds=effectiveStat(resolvedCurrentYear,effectiveStat(manual.yearFinds, local.year));
@@ -5084,6 +5135,7 @@ bindOptional("#loadDemo","click",async()=>{
 
 bindOptional("#originSearchBtn","click",searchOrigin);
 bindOptional("#originSearch","input",suggestOrigin);
+bindOptional("#gcSearchPlace","input",suggestGcPlace);
 bindOptional("#originSearch","keydown",e=>{if(e.key==="Enter"){e.preventDefault();searchOrigin();}});
 bindOptional("#originLocationBtn","click",useCurrentLocation);
 bindOptional("#originMapBtn","click",enableMapOriginPick);
@@ -5249,6 +5301,9 @@ window.addEventListener("offline",updateNetworkStatus);
 
 
 document.addEventListener("click",e=>{
+  if(!e.target.closest("#gcSearchPlace") && !e.target.closest("#gcSuggestions")){
+    $("#gcSuggestions")?.classList.add("hidden");
+  }
   if(!e.target.closest("#originSearch") && !e.target.closest("#originSuggestions")){
     $("#originSuggestions")?.classList.add("hidden");
   }
