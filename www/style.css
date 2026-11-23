@@ -239,3 +239,7 @@ button{min-height:42px}
 .log-row{display:flex;gap:8px;margin-bottom:6px}
 .log-row select{flex:1}
 .log-text{width:100%;box-sizing:border-box}
+
+/* Update-Hinweis (0.19.0) */
+.update-banner{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:center;background:#e7f5ee;color:#0d4f37;border-bottom:1px solid #b7dcc8;padding:8px 14px;font-size:14px}
+.update-banner.hidden{display:none}

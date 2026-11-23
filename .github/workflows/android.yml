@@ -62,6 +62,16 @@ jobs:
             echo "Kein Signierschlüssel hinterlegt – Debug-Build."
           fi
 
+      - name: Build-Info in die App schreiben
+        run: |
+          node -e '
+            const fs=require("fs");
+            const v=require("./package.json").version;
+            const info={version:v,build:+process.env.GITHUB_RUN_NUMBER,commit:process.env.GITHUB_SHA.slice(0,7),date:new Date().toISOString()};
+            fs.writeFileSync("www/build-info.json",JSON.stringify(info));
+            console.log("Build-Info:",JSON.stringify(info));
+          '
+
       - name: Android-Projekt erzeugen
         run: |
           npx cap add android
@@ -91,10 +101,38 @@ jobs:
       - name: APK zum Herunterladen veröffentlichen
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
         run: |
           VERSION=$(node -p "require('./package.json').version")
-          NOTES="CacheRunde $VERSION – Build ${GITHUB_RUN_NUMBER} vom $(date -u +%Y-%m-%d) (Commit ${GITHUB_SHA::7}). Auf dem Handy herunterladen und installieren."
+          BUILD=${GITHUB_RUN_NUMBER}
+          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          NOTES="CacheRunde $VERSION – Build $BUILD vom ${DATE%%T*} (Commit ${GITHUB_SHA::7}). Auf dem Handy herunterladen und installieren."
+          write_version() {
+            node -e '
+              const [,version,build,commit,date,apk,out]=process.argv;
+              require("fs").writeFileSync(out,JSON.stringify({version,build:+build,commit,date,apk}));
+            ' "$VERSION" "$BUILD" "${GITHUB_SHA::7}" "$DATE" "$1" "$RUNNER_TEMP/version.json"
+          }
+
+          # 1) Release im Code-Repository (funktioniert ohne Login nur, solange es öffentlich ist)
+          write_version "https://github.com/${GITHUB_REPOSITORY}/releases/download/android-latest/CacheRunde.apk"
           gh release delete android-latest --yes --cleanup-tag 2>/dev/null || true
-          gh release create android-latest "$RUNNER_TEMP/CacheRunde.apk" \
-            --title "CacheRunde Android $VERSION (Build ${GITHUB_RUN_NUMBER})" \
+          gh release create android-latest "$RUNNER_TEMP/CacheRunde.apk" "$RUNNER_TEMP/version.json" \
+            --title "CacheRunde Android $VERSION (Build $BUILD)" \
             --notes "$NOTES" --prerelease --target "$GITHUB_SHA"
+
+          # 2) Optional: öffentliches Release-Repository (für einen privaten Code-Stand)
+          if [ -n "$RELEASES_TOKEN" ]; then
+            PUB="${GITHUB_REPOSITORY_OWNER}/cacherunde-releases"
+            TAG="v${VERSION}-b${BUILD}"
+            write_version "https://github.com/${PUB}/releases/download/${TAG}/CacheRunde.apk"
+            GH_TOKEN="$RELEASES_TOKEN" gh release create "$TAG" "$RUNNER_TEMP/CacheRunde.apk" "$RUNNER_TEMP/version.json" \
+              -R "$PUB" --title "CacheRunde $VERSION (Build $BUILD)" --notes "$NOTES" --latest
+            # nur die letzten 5 Versionen aufheben
+            GH_TOKEN="$RELEASES_TOKEN" gh release list -R "$PUB" --limit 100 --json tagName -q '.[5:][].tagName' | while read -r t; do
+              GH_TOKEN="$RELEASES_TOKEN" gh release delete "$t" -R "$PUB" --yes --cleanup-tag || true
+            done
+            echo "Auch in ${PUB} veröffentlicht."
+          else
+            echo "Kein RELEASES_TOKEN – nur im Code-Repository veröffentlicht."
+          fi

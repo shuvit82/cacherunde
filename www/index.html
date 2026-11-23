@@ -15,9 +15,9 @@
   <header class="topbar">
     <div>
       <div class="brand">CacheRunde</div>
-      <div class="subtitle">Prototype 0.18.0 · Echtrouting</div>
+      <div class="subtitle">Prototype 0.19.0 · Echtrouting</div>
     </div>
-    <div style="display:flex;gap:8px;align-items:center"><span class="pill" style="background:#fff;color:#0d4f37">Build 0.18.0</span><div class="top-status">
+    <div style="display:flex;gap:8px;align-items:center"><span id="buildPill" class="pill" style="background:#fff;color:#0d4f37">Build 0.19.0</span><div class="top-status">
           <span id="networkBadge" class="status-chip">Netz: …</span>
           <span id="offlineBadge" class="status-chip">Offline: …</span>
         </div>
@@ -32,7 +32,7 @@
   <div id="progressText" class="progress-text">Bereit.</div>
 </div>
 <div style="background:#fff3cd;color:#664d03;border-bottom:1px solid #ffecb5;padding:8px 18px;text-align:center;font-weight:800">
-  TESTBUILD 0.18.0 · Die X nächsten Caches</div>
+  TESTBUILD 0.19.0 · Update-Prüfung</div>
 
   <div id="toast" class="toast hidden"></div>
 
@@ -581,7 +581,7 @@
 
       <div class="card">
         <h2>Geocaching Provider</h2>
-        <p class="muted">0.18.0 enthält einen realistischen Test Provider für Profil, Funde, Mystery-Finals und Logs. Er nutzt lokale Test-/GPX-Daten und kann später gegen eine autorisierte Schnittstelle ausgetauscht werden.</p>
+        <p class="muted">0.19.0 enthält einen realistischen Test Provider für Profil, Funde, Mystery-Finals und Logs. Er nutzt lokale Test-/GPX-Daten und kann später gegen eine autorisierte Schnittstelle ausgetauscht werden.</p>
         <div class="form-grid">
           <label>Provider
             <select id="gcProvider">
@@ -601,6 +601,13 @@
           <button id="syncGc" class="ghost span2">Synchronisieren</button>
         </div>
         <div id="gcApiStatus" class="muted" style="margin-top:10px">Nicht verbunden.</div>
+      </div>
+
+      <div class="card">
+        <h2>App-Version</h2>
+        <p>Installiert: <strong id="installedVersion">—</strong></p>
+        <div class="data-actions"><button id="checkUpdate" class="ghost">Nach Updates suchen</button></div>
+        <div id="updateStatus" class="muted" style="margin-top:6px">Die App prüft beim Start automatisch (höchstens alle 12 Stunden).</div>
       </div>
 
       <div class="card">

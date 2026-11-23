@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.18.0";
+const APP_VERSION="0.19.0";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -4525,6 +4525,107 @@ window.cacheRundeOpenLabApp=()=>openAdventureLabApp();
 window.cacheRundeLabFound=id=>markLabFound(id);
 window.cacheRundeRemoveLab=id=>removeLabStation(id);
 
+/* ---- Update-Prüfung (seit 0.19.0) ----
+   Der Android-Build legt build-info.json in die App und veröffentlicht version.json
+   neben der APK. Die App vergleicht beide Build-Nummern. */
+
+const UPDATE_SOURCES=[
+  // öffentliches Release-Repository (für den Fall, dass der Code privat ist)
+  "https://github.com/shuvit82/cacherunde-releases/releases/latest/download/version.json",
+  // Release im Code-Repository (solange es öffentlich ist)
+  "https://github.com/shuvit82/cacherunde/releases/download/android-latest/version.json"
+];
+const UPDATE_CHECK_KEY="cacherunde-update-check";
+let localBuildCache;
+
+async function localBuildInfo(){
+  if(localBuildCache!==undefined)return localBuildCache;
+  try{
+    const r=await fetch("build-info.json",{cache:"no-store"});
+    localBuildCache=r.ok?await r.json():null;
+  }catch(e){localBuildCache=null;}
+  return localBuildCache;
+}
+
+async function fetchRemoteVersion(){
+  const found=[];
+  for(const url of UPDATE_SOURCES){
+    try{
+      const r=await fetch(url+(url.includes("?")?"&":"?")+"t="+Date.now(),{cache:"no-store",headers:{"Accept":"application/json"}});
+      if(!r.ok)continue;
+      const v=JSON.parse(await r.text());
+      if(v&&Number.isFinite(+v.build)&&v.apk)found.push({...v,build:+v.build,source:url});
+    }catch(e){}
+  }
+  found.sort((a,b)=>b.build-a.build);
+  return found[0]||null;
+}
+
+function showUpdateBanner(remote){
+  let el=$("#updateBanner");
+  if(!el){
+    el=document.createElement("div");
+    el.id="updateBanner";
+    el.className="update-banner";
+    document.querySelector(".topbar")?.insertAdjacentElement("afterend",el);
+  }
+  el.innerHTML=`<span>Neue Version <strong>${escapeHtmlText(remote.version)} (Build ${remote.build})</strong> verfügbar.</span>
+    <button id="updateDownload" class="primary">Herunterladen</button>
+    <button id="updateLater" class="ghost">Später</button>`;
+  el.classList.remove("hidden");
+  $("#updateDownload").onclick=()=>downloadUpdate(remote);
+  $("#updateLater").onclick=()=>el.classList.add("hidden");
+}
+
+function downloadUpdate(remote){
+  showToast("Der Download startet im Browser. Danach die APK öffnen und über die vorhandene App installieren.","success",9000);
+  // Externe Adresse: Android übergibt sie an den Browser, der die APK herunterlädt.
+  location.href=remote.apk;
+}
+
+async function checkForUpdate(manual=false){
+  const status=$("#updateStatus");
+  const local=await localBuildInfo();
+  if(!isNativeApp()||!local){
+    if(manual&&status)status.textContent="Die Update-Prüfung gibt es nur in der Android-App.";
+    return null;
+  }
+  if(status)status.textContent="Suche nach Updates …";
+  const remote=await fetchRemoteVersion();
+  try{localStorage.setItem(UPDATE_CHECK_KEY,String(Date.now()));}catch(e){}
+  if(!remote){
+    if(status)status.textContent="Update-Server nicht erreichbar. Später erneut versuchen.";
+    if(manual)showToast("Keine Verbindung zum Update-Server.","warn",4000);
+    return null;
+  }
+  const when=new Date().toLocaleString("de-DE",{dateStyle:"short",timeStyle:"short"});
+  if(remote.build>(+local.build||0)){
+    if(status)status.textContent=`Neue Version ${remote.version} (Build ${remote.build}) verfügbar · geprüft ${when}`;
+    showUpdateBanner(remote);
+  }else{
+    if(status)status.textContent=`Du hast die neueste Version · geprüft ${when}`;
+    if(manual)showToast("CacheRunde ist auf dem neuesten Stand.","success",3500);
+  }
+  return remote;
+}
+
+async function initUpdateUi(){
+  const local=await localBuildInfo();
+  const v=$("#installedVersion");
+  if(v){
+    v.textContent=local
+      ? `${local.version} (Build ${local.build}) · ${new Date(local.date).toLocaleDateString("de-DE")}`
+      : `${APP_VERSION} (Web-Version)`;
+  }
+  if(local&&$("#buildPill"))$("#buildPill").textContent=`Build ${local.version} · ${local.build}`;
+  // automatisch höchstens alle 12 Stunden
+  let last=0;
+  try{last=+localStorage.getItem(UPDATE_CHECK_KEY)||0;}catch(e){}
+  if(isNativeApp()&&local&&Date.now()-last>12*3600*1000){
+    setTimeout(()=>checkForUpdate(false),4000);
+  }
+}
+
 function parseMyFindsGpx(text,username){
   const doc=new DOMParser().parseFromString(text,"application/xml");
   if(doc.getElementsByTagName("parsererror").length)throw new Error("Die Datei ist kein gültiges GPX.");
@@ -5048,6 +5149,8 @@ bindOptional("#openProjectGcStats","click",openProjectGcStats);
 bindOptional("#gcLoginBtn","click",gcLogin);
 bindOptional("#gcLoginBtnData","click",gcLogin);
 bindOptional("#gcLoadCaches","click",gcSearchByPlace);
+bindOptional("#checkUpdate","click",()=>checkForUpdate(true));
+setTimeout(()=>{try{initUpdateUi();}catch(e){console.warn(e);}},500);
 bindOptional("#gcCount","change",()=>{try{localStorage.setItem("cacherunde-gc-count",$("#gcCount").value);}catch(e){}});
 try{const gcN=localStorage.getItem("cacherunde-gc-count");if(gcN&&$("#gcCount"))$("#gcCount").value=gcN;}catch(e){}
 bindOptional("#gcSearchPlace","keydown",e=>{if(e.key==="Enter"){e.preventDefault();gcSearchByPlace();}});
