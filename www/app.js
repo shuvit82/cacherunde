@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.20.3";
+const APP_VERSION="0.20.4";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -4354,7 +4354,9 @@ async function loadCachesFromGeocachingInner(){
   const countSel=$("#gcCount")?.value||"all";
   const nearestN=countSel==="all"?0:Math.max(1,parseInt(countSel,10)||0);
   const searchRadius=nearestN?50:radius;
-  const maxFetch=nearestN?Math.min(1000,Math.ceil(nearestN*1.3/50)*50):1000;
+  const onlySolved=$("#gcOnlySolved")?$("#gcOnlySolved").checked:true;
+  // Ungelöste Mysterys und Events fallen später weg – bei "X nächste" entsprechend mehr holen.
+  const maxFetch=nearestN?Math.min(1000,Math.ceil(nearestN*(onlySolved?2:1.3)/50)*50):1000;
   const onProgress=e=>{
     const {loaded,total}=e.detail||{};
     const pct=total?Math.min(90,10+Math.round(80*loaded/total)):30;
@@ -4378,6 +4380,7 @@ async function loadCachesFromGeocachingInner(){
       .filter(x=>x.status===0)
       .filter(x=>!GC_EVENT_TYPES.has(x.type))
       .filter(x=>!(me&&x.owner&&x.owner.toLowerCase()===me))
+      .filter(x=>!(onlySolved&&x.type===8&&!x.corrected))
       .map(gcResultToCache)
       .filter(c=>Number.isFinite(c.lat)&&Number.isFinite(c.lon));
     let farthestKm=0;
@@ -4396,7 +4399,9 @@ async function loadCachesFromGeocachingInner(){
     applyLoadedCaches(caches,status);
     finishProgress(`${caches.length} Caches geladen.`);
     showToast(
-      `${caches.length} Caches geladen (ohne gefundene, deaktivierte und Events). Mysterys mit gelöstem Final: ${solved} von ${mysteries.length}.`+
+      (onlySolved
+        ? `${caches.length} Caches geladen (ohne gefundene, deaktivierte, Events und ungelöste Mysterys), davon ${solved} gelöste Mysterys.`
+        : `${caches.length} Caches geladen (ohne gefundene, deaktivierte und Events). Mysterys mit gelöstem Final: ${solved} von ${mysteries.length}.`)+
       (nearestN
         ? ` Der entfernteste liegt ${farthestKm.toFixed(1)} km entfernt.`+(farthestKm>radius?` Für die Planung zählt dein Suchradius von ${radius} km – ggf. erhöhen.`:"")
         : (d.truncated?` Achtung: auf 1000 von ${d.total} begrenzt – Radius verkleinern.`:"")),
@@ -5304,6 +5309,8 @@ bindOptional("#placeUseLocation","click",()=>{ $("#gcSearchPlace").value=""; $("
 bindOptional("#checkUpdate","click",()=>checkForUpdate(true));
 setTimeout(()=>{try{initUpdateUi();}catch(e){console.warn(e);}},500);
 bindOptional("#gcCount","change",()=>{try{localStorage.setItem("cacherunde-gc-count",$("#gcCount").value);}catch(e){}});
+bindOptional("#gcOnlySolved","change",()=>{try{localStorage.setItem("cacherunde-gc-only-solved",$("#gcOnlySolved").checked?"1":"0");}catch(e){}});
+try{const os=localStorage.getItem("cacherunde-gc-only-solved");if(os!==null&&$("#gcOnlySolved"))$("#gcOnlySolved").checked=os==="1";}catch(e){}
 try{const gcN=localStorage.getItem("cacherunde-gc-count");if(gcN&&$("#gcCount"))$("#gcCount").value=gcN;}catch(e){}
 bindOptional("#gcSearchPlace","keydown",e=>{if(e.key==="Enter"){e.preventDefault();gcSearchByPlace();}});
 bindOptional("#gcSearchPlace","focus",updateGcCenterLabel);

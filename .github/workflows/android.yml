@@ -1,15 +1,8 @@
 name: Android-App bauen
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "www/**"
-      - "resources/**"
-      - "scripts/**"
-      - "package.json"
-      - "capacitor.config.json"
-      - ".github/workflows/android.yml"
+  # Nur auf Anforderung bauen (Actions → "Android-App bauen" → "Run workflow"),
+  # nicht bei jedem Push.
   workflow_dispatch:
 
 permissions:
