@@ -80,7 +80,7 @@
 
   async function gcLogin(){
     const IAB=await browserPlugin();
-    if(!IAB)return {ok:false,message:`In-App-Browser nicht verfügbar [0.21.0 · ${lastPluginInfo}]`};
+    if(!IAB)return {ok:false,message:`In-App-Browser nicht verfügbar [0.21.1 · ${lastPluginInfo}]`};
     try{await IAB.removeAllListeners();}catch(e){}
     let closedByUs=false;
     try{
@@ -104,7 +104,7 @@
         toolbarType:"compact"
       });
     }catch(e){
-      return {ok:false,message:`Anmeldefenster ließ sich nicht öffnen: ${e&&e.message||e} [0.21.0 · ${lastPluginInfo}]`};
+      return {ok:false,message:`Anmeldefenster ließ sich nicht öffnen: ${e&&e.message||e} [0.21.1 · ${lastPluginInfo}]`};
     }
     return {ok:true,browser:"In-App-Browser"};
   }
@@ -196,6 +196,12 @@
     };
   }
 
+  // "N 50° 07.380' E 008° 44.100'"
+  function coordText(lat,lon){
+    const f=(v,pos,neg,w)=>{const h=v<0?neg:pos;v=Math.abs(v);const d=Math.floor(v);const m=(v-d)*60;return `${h} ${d}° ${m.toFixed(3).padStart(6,"0")}'`;};
+    return `${f(lat,"N","S",2)} ${f(lon,"E","W",3)}`;
+  }
+
   async function gcSearch(q){
     const lat=parseFloat(q.get("lat")),lon=parseFloat(q.get("lon"));
     if(!Number.isFinite(lat)||!Number.isFinite(lon))return {ok:false,message:"Kein Suchmittelpunkt."};
@@ -205,7 +211,9 @@
     const results=[];
     let total=null,user=null,isBasic=null,skip=0,pages=0;
     while(results.length<max){
-      const url=`${GC}/play/results?lat=${lat.toFixed(6)}&lng=${lon.toFixed(6)}&r=${radius}&sort=distance&asc=true&skip=${skip}${hideFound?"&hf=1":""}`;
+      // ot=coords + st: Suchpunkt ausdrücklich als Bezugspunkt (wie die Koordinatensuche der Website).
+      // Ohne das bezieht geocaching.com "nach Entfernung" auf die Heimkoordinaten des Kontos.
+      const url=`${GC}/play/results?st=${encodeURIComponent(coordText(lat,lon))}&lat=${lat.toFixed(6)}&lng=${lon.toFixed(6)}&ot=coords&r=${radius}&sort=distance&asc=true&skip=${skip}${hideFound?"&hf=1":""}`;
       const {status,html}=await getHtml(url);
       const nd=nextData(html);
       const pp=nd&&nd.props&&nd.props.pageProps;

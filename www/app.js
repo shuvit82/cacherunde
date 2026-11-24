@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.21.0";
+const APP_VERSION="0.21.1";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -4233,13 +4233,11 @@ async function loadCachesFromGeocachingInner(){
     return;
   }
   const radius=+($("#quickRadius")?.value||10);
-  // Auswahl "die X nächsten Caches" (seit 0.18.0): großer Suchradius, nach Entfernung sortiert, danach kürzen
+  // "Die X nächsten" (seit 0.21.1): kleiner Umkreis zuerst, nur bei Bedarf erweitern; selbst nach Entfernung sortieren.
   const countSel=$("#gcCount")?.value||"all";
   const nearestN=countSel==="all"?0:Math.max(1,parseInt(countSel,10)||0);
-  const searchRadius=nearestN?50:radius;
   const onlySolved=$("#gcOnlySolved")?$("#gcOnlySolved").checked:true;
-  // Ungelöste Mysterys und Events fallen später weg – bei "X nächste" entsprechend mehr holen.
-  const maxFetch=nearestN?Math.min(1000,Math.ceil(nearestN*(onlySolved?2:1.3)/50)*50):1000;
+  const radii=nearestN?[2,4,8,15,30,50]:[radius];
   const onProgress=e=>{
     const {loaded,total}=e.detail||{};
     const pct=total?Math.min(90,10+Math.round(80*loaded/total)):30;
@@ -4247,34 +4245,45 @@ async function loadCachesFromGeocachingInner(){
   };
   window.addEventListener("cr-gc-search-progress",onProgress);
   try{
-    setProgress(5,nearestN?`Suche die ${nearestN} nächsten Caches …`:`Suche Caches im Umkreis von ${radius} km …`,"geocaching.com");
-    const r=await fetch(`/api/gc-search?lat=${center.lat}&lon=${center.lon}&radius=${searchRadius}&hideFound=1&max=${maxFetch}`,{cache:"no-store"});
-    const d=await r.json();
-    if(!d.ok){
-      if(d.loginRequired){
-        failProgress("Nicht bei geocaching.com angemeldet.");
-        if(confirm("Du bist in CacheRunde noch nicht bei geocaching.com angemeldet. Jetzt anmelden?"))gcLogin();
-        return;
+    let d=null,caches=[],usedRadius=radius,outside=0;
+    for(const r of radii){
+      usedRadius=r;
+      setProgress(5,nearestN?`Suche die ${nearestN} nächsten Caches (Umkreis ${r} km) …`:`Suche Caches im Umkreis von ${r} km …`,"geocaching.com");
+      const res=await fetch(`/api/gc-search?lat=${center.lat}&lon=${center.lon}&radius=${r}&hideFound=1&max=${nearestN?600:1000}`,{cache:"no-store"});
+      d=await res.json();
+      if(!d.ok){
+        if(d.loginRequired){
+          failProgress("Nicht bei geocaching.com angemeldet.");
+          if(confirm("Du bist in CacheRunde noch nicht bei geocaching.com angemeldet. Jetzt anmelden?"))gcLogin();
+          return;
+        }
+        throw new Error(d.message||"Suche fehlgeschlagen");
       }
-      throw new Error(d.message||"Suche fehlgeschlagen");
+      const me=(d.user||"").toLowerCase();
+      const all=(d.results||[])
+        .filter(x=>x.status===0)
+        .filter(x=>!GC_EVENT_TYPES.has(x.type))
+        .filter(x=>!(me&&x.owner&&x.owner.toLowerCase()===me))
+        .filter(x=>!(onlySolved&&x.type===8&&!x.corrected))
+        .map(gcResultToCache)
+        .filter(c=>Number.isFinite(c.lat)&&Number.isFinite(c.lon));
+      // Schutz: nur Caches, die wirklich im Umkreis um den Suchort liegen
+      caches=all.filter(c=>haversine(center,c)<=r*1.05+0.3);
+      outside=all.length-caches.length;
+      if(!nearestN||caches.length>=nearestN)break;
     }
-    const me=(d.user||"").toLowerCase();
-    let caches=(d.results||[])
-      .filter(x=>x.status===0)
-      .filter(x=>!GC_EVENT_TYPES.has(x.type))
-      .filter(x=>!(me&&x.owner&&x.owner.toLowerCase()===me))
-      .filter(x=>!(onlySolved&&x.type===8&&!x.corrected))
-      .map(gcResultToCache)
-      .filter(c=>Number.isFinite(c.lat)&&Number.isFinite(c.lon));
+    if(outside>0&&!caches.length){
+      throw new Error(`geocaching.com hat ${outside} Caches um einen anderen Ort geliefert (nicht um den Suchort). Bitte melden.`);
+    }
+    caches.sort((x,y)=>haversine(center,x)-haversine(center,y));
     let farthestKm=0;
     if(nearestN){
-      caches.sort((a,b)=>haversine(center,a)-haversine(center,b));
       caches=caches.slice(0,nearestN);
       farthestKm=caches.length?haversine(center,caches[caches.length-1]):0;
     }
     const mysteries=caches.filter(c=>c.type==="Mystery");
     const solved=mysteries.filter(c=>c.corrected).length;
-    const save={loadedAt:new Date().toISOString(),center,radius,user:d.user,total:d.total,truncated:!!d.truncated,caches};
+    const save={loadedAt:new Date().toISOString(),center,radius:nearestN?usedRadius:radius,user:d.user,total:d.total,truncated:!!d.truncated,caches};
     try{localStorage.setItem(GC_CACHE_KEY,JSON.stringify(save));}catch(e){}
     const status=nearestN
       ? `${caches.length} nächste Caches von geocaching.com · bis ${farthestKm.toFixed(1)} km`
@@ -4287,7 +4296,8 @@ async function loadCachesFromGeocachingInner(){
         : `${caches.length} Caches geladen (ohne gefundene, deaktivierte und Events). Mysterys mit gelöstem Final: ${solved} von ${mysteries.length}.`)+
       (nearestN
         ? ` Der entfernteste liegt ${farthestKm.toFixed(1)} km entfernt.`+(farthestKm>radius?` Für die Planung zählt dein Suchradius von ${radius} km – ggf. erhöhen.`:"")
-        : (d.truncated?` Achtung: auf 1000 von ${d.total} begrenzt – Radius verkleinern.`:"")),
+        : (d.truncated?` Achtung: auf 1000 von ${d.total} begrenzt – Radius verkleinern.`:""))+
+      (outside?` ${outside} Treffer außerhalb des Umkreises verworfen.`:""),
       "success",8000
     );
   }catch(e){
