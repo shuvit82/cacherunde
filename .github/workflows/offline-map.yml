@@ -1,0 +1,113 @@
+name: Offline-Karte erzeugen
+
+# Schneidet aus der aktuellen Protomaps-Weltkarte (OpenStreetMap-Daten) ein
+# kreisförmiges Gebiet aus und legt es als Asset an die Release "maps".
+# Die App lädt die Datei von dort einmal herunter und zeigt die Karte offline.
+on:
+  workflow_dispatch:
+    inputs:
+      id:
+        description: "Kurzname (Dateiname), z. B. otzberg-100km"
+        required: true
+        default: "otzberg-100km"
+      name:
+        description: "Anzeigename"
+        required: true
+        default: "Otzberg + 100 km"
+      lat:
+        description: "Mittelpunkt Breite"
+        required: true
+        default: "49.8300"
+      lon:
+        description: "Mittelpunkt Länge"
+        required: true
+        default: "8.8800"
+      radius_km:
+        description: "Radius in km"
+        required: true
+        default: "100"
+      maxzoom:
+        description: "Höchste Zoomstufe (15 = volle Details)"
+        required: true
+        default: "15"
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: pmtiles-Werkzeug holen
+        run: |
+          gh release download --repo protomaps/go-pmtiles --pattern "*Linux_x86_64.tar.gz" --dir /tmp/pm
+          tar -xzf /tmp/pm/*.tar.gz -C /tmp/pm
+          sudo install /tmp/pm/pmtiles /usr/local/bin/pmtiles
+          pmtiles version || true
+
+      - name: Neueste Weltkarte finden
+        id: build
+        run: |
+          for i in $(seq 0 21); do
+            d=$(date -u -d "-$i day" +%Y%m%d)
+            if curl -sfI "https://build.protomaps.com/$d.pmtiles" >/dev/null; then
+              echo "date=$d" >> "$GITHUB_OUTPUT"; echo "Weltkarte: $d"; exit 0
+            fi
+          done
+          echo "Keine aktuelle Protomaps-Weltkarte gefunden" >&2; exit 1
+
+      - name: Kreisgebiet als GeoJSON
+        run: |
+          python3 - <<'PY'
+          import json, math, os
+          lat=float("${{ inputs.lat }}"); lon=float("${{ inputs.lon }}"); r=float("${{ inputs.radius_km }}")
+          pts=[]
+          for i in range(129):
+              a=2*math.pi*(i%128)/128
+              dlat=r/111.32*math.cos(a)
+              dlon=r/(111.32*math.cos(math.radians(lat)))*math.sin(a)
+              pts.append([round(lon+dlon,6), round(lat+dlat,6)])
+          json.dump({"type":"Polygon","coordinates":[pts]}, open("/tmp/region.geojson","w"))
+          xs=[p[0] for p in pts]; ys=[p[1] for p in pts]
+          open(os.environ["GITHUB_ENV"],"a").write(f"BBOX={min(xs)},{min(ys)},{max(xs)},{max(ys)}\n")
+          PY
+
+      - name: Größe vorab prüfen
+        run: |
+          pmtiles extract "https://build.protomaps.com/${{ steps.build.outputs.date }}.pmtiles" /tmp/dry.pmtiles \
+            --region=/tmp/region.geojson --maxzoom=${{ inputs.maxzoom }} --dry-run | tee /tmp/dry.txt
+
+      - name: Ausschneiden
+        run: |
+          pmtiles extract "https://build.protomaps.com/${{ steps.build.outputs.date }}.pmtiles" "/tmp/${{ inputs.id }}.pmtiles" \
+            --region=/tmp/region.geojson --maxzoom=${{ inputs.maxzoom }} --download-threads=8
+          ls -l "/tmp/${{ inputs.id }}.pmtiles"
+          size=$(stat -c %s "/tmp/${{ inputs.id }}.pmtiles")
+          echo "SIZE=$size" >> "$GITHUB_ENV"
+          if [ "$size" -ge 2147000000 ]; then echo "Datei größer als 2 GB – GitHub erlaubt das nicht. Radius oder Zoom verkleinern." >&2; exit 1; fi
+
+      - name: In Release "maps" hochladen
+        run: |
+          R="${{ github.repository }}"
+          gh release view maps --repo "$R" >/dev/null 2>&1 || \
+            gh release create maps --repo "$R" --title "Offline-Karten" --notes "Kartendateien (PMTiles, © OpenStreetMap-Mitwirkende, Protomaps) für CacheRunde. Werden von der App geladen." --latest=false
+          gh release download maps --repo "$R" --pattern maps.json --dir /tmp/old 2>/dev/null || true
+          python3 - <<'PY'
+          import json, os, datetime
+          try: idx=json.load(open("/tmp/old/maps.json"))
+          except Exception: idx={"maps":[]}
+          e={"id":"${{ inputs.id }}","name":"${{ inputs.name }}","file":"${{ inputs.id }}.pmtiles",
+             "lat":float("${{ inputs.lat }}"),"lon":float("${{ inputs.lon }}"),"radiusKm":float("${{ inputs.radius_km }}"),
+             "maxzoom":int("${{ inputs.maxzoom }}"),"bbox":[float(v) for v in os.environ["BBOX"].split(",")],
+             "size":int(os.environ["SIZE"]),"osmDate":"${{ steps.build.outputs.date }}",
+             "created":datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%MZ")}
+          idx["maps"]=[m for m in idx.get("maps",[]) if m.get("id")!=e["id"]]+[e]
+          json.dump(idx, open("/tmp/maps.json","w"), ensure_ascii=False, indent=1)
+          print(json.dumps(e, ensure_ascii=False))
+          PY
+          gh release upload maps --repo "$R" --clobber "/tmp/${{ inputs.id }}.pmtiles" /tmp/maps.json
+          echo "### Offline-Karte ${{ inputs.name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Größe: $((SIZE/1048576)) MB · OSM-Stand ${{ steps.build.outputs.date }}" >> "$GITHUB_STEP_SUMMARY"
