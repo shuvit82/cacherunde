@@ -254,3 +254,5 @@ button{min-height:42px}
 .place-card{display:flex;flex-direction:column;gap:6px;position:relative}
 .place-card .search-row{display:flex;gap:8px}
 .place-card .search-row input{flex:1}
+
+.search-info{margin:4px 0 10px;font-size:13px}

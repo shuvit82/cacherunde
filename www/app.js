@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.20.1";
+const APP_VERSION="0.20.2";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -1623,13 +1623,26 @@ async function enrichRouteNames(routes){
   routes.forEach(r=>r.displayName=`${r.placeName} · ${routeDescriptor(r,routes)}`);
 }
 
+function searchInfoHtml(){
+  const i=state.lastSearchInfo;
+  if(!i)return "";
+  return `<div class="muted search-info">Gesucht um <strong>${escapeHtmlText(String(i.place).split(",")[0])}</strong> · Radius ${i.radius} km · ${i.inRadius} passende Cache(s) im Radius</div>`;
+}
+
 function renderRoutes(container, routes, sortMode="distance"){
   const host=$(container); host.innerHTML="";
   const sorted=sortRoutes(routes,sortMode);
   if(!sorted.length){
-    host.innerHTML=`<div class="card"><strong>Keine passende Runde gefunden.</strong><p class="muted">Versuche einen größeren Radius, mehr Wanderzeit oder einen größeren Cache-Abstand. Du kannst in „Touren“ testweise auch „Gefundene ausschließen“ deaktivieren.</p>${diagnosticsHtml()}</div>`;
+    const none=state.lastSearchInfo&&state.lastSearchInfo.inRadius===0;
+    const hint=none
+      ? (isNativeApp()
+          ? "Um diesen Suchort sind keine passenden Caches geladen. Tippe auf „Caches von geocaching.com laden“ oder vergrößere den Radius."
+          : "Um diesen Suchort sind keine passenden Caches im importierten GPX. Importiere eine Pocket Query für dieses Gebiet oder vergrößere den Radius.")
+      : "Versuche einen größeren Radius, mehr Wanderzeit oder einen größeren Cache-Abstand. Du kannst in „Touren“ testweise auch „Gefundene ausschließen“ deaktivieren.";
+    host.innerHTML=`<div class="card"><strong>Keine passende Runde gefunden.</strong>${searchInfoHtml()}<p class="muted">${hint}</p>${diagnosticsHtml()}</div>`;
     return;
   }
+  host.insertAdjacentHTML("beforeend",searchInfoHtml());
   sorted.forEach((r,i)=>{
     const node=$("#routeTemplate").content.cloneNode(true);
     node.querySelector(".rank").textContent=`Vorschlag ${i+1}`;
@@ -2121,10 +2134,26 @@ function downloadRouteGPX(r){
 }
 
 async function search(quick=false){
-  setProgress(10,"Filter werden angewendet …","Tourensuche");
-  const opts=getOpts(quick);
-  state.routes=buildRoutes(opts);
   const host=$(quick?"#quickResults":"#advancedResults");
+  // Läuft noch ein Laden von geocaching.com, erst darauf warten (sonst wird mit alten Caches gesucht).
+  if(state.gcLoading){
+    host.innerHTML='<div class="card"><strong>Warte, bis die Caches von geocaching.com geladen sind …</strong></div>';
+    try{await state.gcLoading;}catch(e){}
+  }
+  setProgress(10,"Filter werden angewendet …","Tourensuche");
+  let opts=getOpts(quick);
+  // Keine geladenen Caches um den Suchort? In der App automatisch von geocaching.com nachladen.
+  if(isNativeApp()&&Number.isFinite(opts.start.lat)&&filteredCaches({...opts,excludeFound:false,tradis:true,mysteries:true,multis:true,labs:true}).length===0){
+    host.innerHTML='<div class="card"><strong>Um den Suchort sind noch keine Caches geladen – lade sie von geocaching.com …</strong></div>';
+    try{await loadCachesFromGeocaching();}catch(e){}
+    opts=getOpts(quick);
+  }
+  state.routes=buildRoutes(opts);
+  state.lastSearchInfo={
+    place:($("#placeStatus")?.textContent||"").replace(/^Suchort:\s*/,"")||"Ausgangspunkt",
+    radius:opts.radius,
+    inRadius:filteredCaches(opts).length
+  };
 
   if(state.routes.length && (opts.minCaches||0)>0){
     host.innerHTML=`<div class="card"><strong>Prüfe Mindestzahl ${opts.minCaches} mit echten Fußwegen …</strong><p class="muted">Nur Routen, bei denen nach realer Cacheketten-Prüfung mindestens ${opts.minCaches} Caches übrig bleiben, werden angezeigt.</p></div>`;
@@ -4276,6 +4305,12 @@ function planningCenter(){
 }
 
 async function loadCachesFromGeocaching(){
+  if(state.gcLoading)return state.gcLoading;
+  state.gcLoading=loadCachesFromGeocachingInner().finally(()=>{state.gcLoading=null;});
+  return state.gcLoading;
+}
+
+async function loadCachesFromGeocachingInner(){
   if(!isNativeApp()){
     showToast("Die Cache-Suche über geocaching.com geht nur in der Android-App.","error",5000);
     return;
