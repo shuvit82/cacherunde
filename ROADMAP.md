@@ -1,0 +1,16 @@
+# CacheRunde – offene Punkte und Optionen
+
+## Option: Geoapify als Hauptanbieter (falls die freien Dienste weiter Probleme machen)
+- Ein Schlüssel für Fußrouting, Ortssuche mit Vorschlägen, Ortsnamen (reverse) und Parkplätze (Places API, Kategorie Parken).
+- Kostenlos: 3.000 Credits/Tag, 5 Anfragen/s, keine Kreditkarte; 1 einfache Anfrage = 1 Credit.
+- Schlüssel NICHT ins Repository, sondern in der App unter „Ich“ eintragen (wie der Google-Schlüssel).
+- Freie Dienste (FOSSGIS-Routing, Photon, Overpass, Nominatim) bleiben als Rückfall.
+- Optional zusätzlich: OpenRouteService mit Profil „foot-hiking“ (kostenlos, 2.000 Routen/Tag, 40/Minute).
+
+## Cacherstats-Ränge (Welt / Deutschland)
+- RankingList.pl liefert die Liste nur per POST (Lang, Loc, RPP, Action=Query); kein Namensfeld sichtbar.
+- Am PC mit Claude in Chrome live untersuchen, wie gesucht/geblättert wird; ggf. per Fundzahl (von geocaching.com) gezielt ansteuern.
+
+## Weitere Ideen
+- Navigationsansicht mit Live-Standort, Richtungspfeil, Kartenvorrat fürs Gebiet.
+- Tracking im Hintergrund mit GPX-Export.
