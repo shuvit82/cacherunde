@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.20.5";
+const APP_VERSION="0.20.6";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -20,8 +20,6 @@ const state = {
   gpxImportStats:{waypoints:0,caches:0,ignoredWaypoints:0},
   profile: {gcUsername:"",csUsername:"",profileUrl:"https://www.geocaching.com/p/default.aspx?guid=363b1243-156e-4600-ade9-81c58d8b57b4",knownGermanyRank:52364},
   manualStats:{},
-  apiConnected:false,
-  gcProvider:null,
   pendingLogs:[],
   savedTours:[],
   activeTour:null,
@@ -676,7 +674,7 @@ async function refreshSystemStatus(){
   setClass("#networkBadge",`status-chip ${online?"ok":"warn"}`);
   setText("#systemRouting",online?"bereit":"offline");
   setText("#systemGoogle",state.googlePlaces.enabled&&state.googlePlaces.key?"aktiv":"optional");
-  setText("#systemGc",state.apiConnected?"verbunden":"Test/aus");
+  setText("#systemGc",isNativeApp()?"per Login":"nur in der App");
   const storage=storageSummary();
   setText("#systemStorage",`${storage.kb.toFixed(0)} KB`);
 
@@ -2386,80 +2384,6 @@ function autoLocateOrigin(){
 
 
 
-class MockGeocachingProvider{
-  constructor(profile="normal"){
-    this.profile=profile;
-    this.connected=false;
-  }
-  async connect(username){
-    await sleep(500);
-    this.connected=true;
-    const premium=this.profile==="premium";
-    return {
-      username:username||"TestCacher",
-      membership:premium?"Premium":"Basic",
-      totalFinds:this.profile==="empty"?0:12847,
-      yearFinds:this.profile==="empty"?0:426
-    };
-  }
-  async sync(caches){
-    await sleep(700);
-    if(!this.connected)throw new Error("Provider nicht verbunden");
-    let finals=0,found=0;
-    // Früher markierte dieser Test-Anbieter zufällig Caches als gefunden bzw. Mysterys als gelöst.
-    // Das verfälschte echte Daten und ist entfernt (0.20.5).
-    return {foundUpdated:found,finalsUpdated:finals};
-  }
-  async submitLog(entry){
-    if(!this.connected)throw new Error("Provider nicht verbunden");
-    await sleep(400);
-    return {ok:true,remoteId:`mock-${Date.now()}-${Math.floor(Math.random()*1000)}`,...entry};
-  }
-}
-
-function createProvider(){
-  const type=$("#gcProvider")?.value||"mock";
-  if(type==="mock")return new MockGeocachingProvider($("#mockProfile")?.value||"normal");
-  throw new Error("Dieser Provider ist in diesem Build nicht verfügbar.");
-}
-
-async function connectGeocaching(){
-  try{
-    setProgress(20,"Verbinde Test Provider …","Geocaching");
-    state.gcProvider=createProvider();
-    const profile=await state.gcProvider.connect(state.profile.gcUsername||"TestCacher");
-    state.apiConnected=true;
-    $("#gcApiStatus").innerHTML=`<span class="provider-ok">Verbunden:</span> ${profile.username} · ${profile.membership} · ${profile.totalFinds} Funde · ${profile.yearFinds} dieses Jahr`;
-    $("#statTotalFinds").textContent=profile.totalFinds;
-    $("#statYearFinds").textContent=profile.yearFinds;
-    finishProgress("Test Provider verbunden.");
-  }catch(e){
-    state.apiConnected=false;
-    failProgress(e.message);
-    $("#gcApiStatus").textContent=`Verbindung fehlgeschlagen: ${e.message}`;
-  }
-}
-
-function disconnectGeocaching(){
-  state.gcProvider=null;
-  state.apiConnected=false;
-  $("#gcApiStatus").textContent="Nicht verbunden.";
-}
-
-async function syncGeocaching(){
-  if(!state.gcProvider){alert("Bitte zuerst Test Provider verbinden.");return;}
-  try{
-    setProgress(15,"Synchronisiere Funde und Mystery-Finals …","Geocaching Sync");
-    const r=await state.gcProvider.sync(state.caches);
-    refreshCacheLayer();
-    populateLogCacheSelect();
-    finishProgress(`Sync fertig: ${r.foundUpdated} Fundstatus, ${r.finalsUpdated} Mystery-Finals aktualisiert.`);
-    $("#gcApiStatus").textContent=`Letzter Sync: ${r.foundUpdated} Fundstatus · ${r.finalsUpdated} Mystery-Finals aktualisiert.`;
-  }catch(e){
-    failProgress(e.message);
-  }
-}
-
 function populateLogCacheSelect(){
   const sel=$("#logCacheSelect");
   if(!sel)return;
@@ -2645,33 +2569,6 @@ async function openDraftsPage(){
   }
   window.open(url,"_blank");
 }
-
-async function sendQueuedLogs(){
-  if(!state.gcProvider){alert("Bitte Test Provider verbinden.");return;}
-  if(!state.pendingLogs.length){alert("Keine Logs vorgemerkt.");return;}
-  const pending=[...state.pendingLogs];
-  const sent=[];
-  try{
-    for(let i=0;i<pending.length;i++){
-      setProgress(10+80*(i/pending.length),`Sende Log ${i+1} von ${pending.length} …`,"Logs senden");
-      const result=await state.gcProvider.submitLog(pending[i]);
-      sent.push(result);
-      const cache=state.caches.find(c=>c.id===pending[i].cacheId);
-      if(cache && pending[i].type==="Found it"){
-        cache.found=true;
-        markCacheCompleted(cache.id);
-      }
-    }
-    state.pendingLogs=[];
-    persistTourState();
-    refreshCacheLayer();
-    updateLogQueueStatus();
-    finishProgress(`${sent.length} Test-Log(s) erfolgreich gesendet.`);
-  }catch(e){
-    failProgress(e.message);
-  }
-}
-
 
 function persistTourState(){
   localStorage.setItem("cacherunde-data-version",String(DATA_VERSION));
@@ -5343,8 +5240,6 @@ bindOptional("#openCacherstats","click",openCacherstatsBrowser);
 bindOptional("#saveManualStats","click",saveManualStats);
 bindOptional("#clearManualStats","click",clearManualStats);
 bindOptional("#recalcLocalStats","click",refreshPersonalStats);
-bindOptional("#connectGc","click",connectGeocaching);
-bindOptional("#syncGc","click",syncGeocaching);
 bindOptional("#queueLog","click",queueLog);
 bindOptional("#sendLogs","click",uploadLogsAsDrafts);
 bindOptional("#exportLogs","click",exportFieldNotes);
@@ -5358,7 +5253,6 @@ setTimeout(()=>{try{
   $("#sendLogs").textContent=native?"Als Entwürfe hochladen":"Als Feldnotiz-Datei speichern";
   $("#exportLogs")?.classList.toggle("hidden",!native);
 }catch(e){}},300);
-bindOptional("#disconnectGc","click",disconnectGeocaching);
 
 bindOptional("#tripSearchBtn","click",searchTripOrigin);
 bindOptional("#tripSearch","input",suggestTrip);
