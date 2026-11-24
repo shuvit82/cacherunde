@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.21.1";
+const APP_VERSION="0.21.2";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -1638,12 +1638,14 @@ async function reversePlaceName(lat,lon){
     const res=await fetch(`/api/reverse?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`,{cache:"no-store"});
     if(!res.ok)throw new Error();
     const d=await res.json(),a=d.address||{};
-    const name=a.village||a.town||a.city||a.municipality||a.suburb||a.hamlet||a.county||d.name||"Cachegebiet";
+    // In Städten den Stadtteil nehmen, damit sich Runden unterscheiden (z. B. "Fechenheim" statt "Frankfurt am Main")
+    const name=a.village||a.town||(a.city&&a.suburb?a.suburb:a.city)||a.municipality||a.suburb||a.hamlet||a.county||d.name||"Cachegebiet";
     placeNameCache.set(key,name);return name;
   }catch(e){return "Cachegebiet";}
 }
 async function enrichRouteNames(routes){
-  await Promise.all(routes.map(async r=>{const c=routeCenter(r);r.placeName=c?await reversePlaceName(c.lat,c.lon):"Cachegebiet";}));
+  // nacheinander statt alle gleichzeitig (Rücksicht auf die freien Dienste); gleiche Gegend kommt aus dem Speicher
+  for(const r of routes){const c=routeCenter(r);r.placeName=c?await reversePlaceName(c.lat,c.lon):"Cachegebiet";}
   routes.forEach(r=>r.displayName=`${r.placeName} · ${routeDescriptor(r,routes)}`);
 }
 

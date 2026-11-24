@@ -11,7 +11,7 @@
 (function(){
   "use strict";
 
-  const VERSION="0.21.1";
+  const VERSION="0.21.2";
   const TILE_CACHE="cacherunde-tiles";
   const nativeFetch=window.fetch.bind(window);
 
@@ -33,19 +33,50 @@
   function text(msg,status=200){
     return new Response(String(msg),{status,headers:{"Content-Type":"text/plain; charset=utf-8"}});
   }
+  // Freie Kartendienste verlangen eine erkennbare Kennung. Im Browser setzt der Browser selbst
+  // Referer/User-Agent; in der App würde sonst eine generische Android-Kennung gesendet (wird blockiert).
+  const APP_UA=`CacheRunde/${VERSION} (Android-App; +https://github.com/shuvit82/cacherunde)`;
+  const NOMINATIM_GAP_MS=1100;
+  let nominatimNext=0;
+  const respCache=new Map();
+
   async function fetchWithTimeout(url,init={},ms=30000){
     const ctrl=new AbortController();
     const t=setTimeout(()=>ctrl.abort(),ms);
     try{
-      return await nativeFetch(url,{...init,signal:ctrl.signal});
+      let headers=init.headers||{};
+      if(isNative()&&/^https?:/.test(String(url))&&!/geocaching\.com|cacherstats\.com|googleapis\.com/.test(String(url))){
+        headers={...headers,"User-Agent":APP_UA};
+      }
+      // Nominatim: höchstens 1 Anfrage pro Sekunde (Nutzungsbedingungen), sonst Sperre
+      if(/nominatim\.openstreetmap\.org/.test(String(url))){
+        const now=Date.now();
+        const wait=Math.max(0,nominatimNext-now);
+        nominatimNext=Math.max(now,nominatimNext)+NOMINATIM_GAP_MS;
+        if(wait)await new Promise(r=>setTimeout(r,wait));
+      }
+      return await nativeFetch(url,{...init,headers,signal:ctrl.signal});
     }finally{
       clearTimeout(t);
     }
   }
-  async function getJson(url,ms=30000){
+
+  // Gleiche GET-Anfrage innerhalb von 30 Minuten aus dem Speicher beantworten
+  async function cachedJson(url,ms=30000,ttl=30*60000){
+    const hit=respCache.get(url);
+    if(hit&&Date.now()-hit.t<ttl)return hit.v;
     const r=await fetchWithTimeout(url,{headers:{"Accept":"application/json"}},ms);
-    if(!r.ok)throw new Error(`HTTP ${r.status} von ${new URL(url).hostname}`);
-    return r.json();
+    if(!r.ok){
+      let detail="";try{detail=(await r.text()).slice(0,120);}catch(e){}
+      throw new Error(`HTTP ${r.status} von ${new URL(url).hostname}${detail?": "+detail:""}`);
+    }
+    const v=await r.json();
+    respCache.set(url,{t:Date.now(),v});
+    if(respCache.size>300)respCache.delete(respCache.keys().next().value);
+    return v;
+  }
+  async function getJson(url,ms=30000){
+    return cachedJson(url,ms);
   }
   // Weiterleiten wie früher Proxy-Get: Statuscode und Inhalt 1:1 an die App.
   async function passThrough(url,ms=45000){
@@ -175,7 +206,18 @@
     async "/api/reverse"(q){
       const lat=q.get("lat"),lon=q.get("lon");
       if(!lat||!lon)return text("lat/lon fehlt",400);
-      return passThrough(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=14&addressdetails=1&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`);
+      try{
+        const d=await cachedJson(`https://photon.komoot.io/reverse?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}&lang=de&limit=1`,10000,24*3600000);
+        const p=(d.features&&d.features[0]&&d.features[0].properties)||null;
+        if(p){
+          const place=p.city||p.town||p.village||p.district||p.locality||p.county||p.name||"";
+          return json({name:p.name||place,display_name:[p.name,p.city,p.state].filter(Boolean).join(", "),
+            address:{village:p.village,town:p.town,city:p.city||place,suburb:p.district,county:p.county,state:p.state,country:p.country},source:"photon"});
+        }
+      }catch(e){}
+      try{
+        return json(await cachedJson(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=14&addressdetails=1&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`,15000,24*3600000));
+      }catch(e){return text(e.message,502);}
     },
 
     async "/api/geocode"(q){
@@ -224,7 +266,23 @@
     async "/api/parking"(q){
       const lat=num(q.get("lat")),lon=num(q.get("lon"));
       if(lat==null||lon==null)return text("lat/lon fehlt",400);
-      const r=num(q.get("radius"))||2500;
+      const r=Math.max(300,Math.min(5000,num(q.get("radius"))||2500));
+      try{
+        const data=await overpass(`[out:json][timeout:15];nwr["amenity"="parking"](around:${r},${lat},${lon});out center tags 60;`);
+        const results=(data.elements||[]).map(e=>{
+          const t=e.tags||{};
+          return {
+            lat:e.lat??e.center?.lat,lon:e.lon??e.center?.lon,
+            name:t.name||(t.parking==="street_side"?"Parkstreifen":"Parkplatz"),display_name:t.name||"Parkplatz",
+            osm_type:e.type,osm_id:e.id,
+            access:t.access||"",parking:t.parking||"",fee:t.fee||"",capacity:+t.capacity||0,
+            hiking:t.hiking||"",surface:t.surface||"",lit:t.lit||"",maxstay:t.maxstay||"",
+            source:"OSM (Overpass)"
+          };
+        }).filter(x=>x.lat!=null&&x.lon!=null);
+        if(results.length)return json({results});
+      }catch(e){}
+      // Rückfall: Nominatim (gebremst)
       const dLat=r/111320;
       const dLon=r/(111320*Math.max(0.1,Math.abs(Math.cos(lat*Math.PI/180))));
       const url=`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=30&bounded=1&layer=poi&amenity=parking&viewbox=${bbox(lat,lon,dLat,dLon)}&addressdetails=1&extratags=1`;
@@ -255,7 +313,6 @@
           for(const i of arr||[])all.push({lat:i.lat,lon:i.lon,name:i.display_name,osm_id:i.osm_id});
         }catch(e){}
         if(all.length>=8)break;
-        await new Promise(r=>setTimeout(r,1100)); // Nominatim: max. 1 Anfrage/Sekunde
       }
       const seen=new Set();
       const results=all.filter(i=>{const k=`${i.lat},${i.lon}`;if(seen.has(k))return false;seen.add(k);return true;}).slice(0,8);
