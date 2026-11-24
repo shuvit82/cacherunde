@@ -256,3 +256,6 @@ button{min-height:42px}
 .place-card .search-row input{flex:1}
 
 .search-info{margin:4px 0 10px;font-size:13px}
+
+.suitable-breakdown{flex-basis:100%;font-size:12px;margin-top:6px}
+.hero{flex-wrap:wrap}

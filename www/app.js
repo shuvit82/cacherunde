@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.20.2";
+const APP_VERSION="0.20.3";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -318,6 +318,33 @@ function makeRouteFromSeed(seed,component,graph,opts,variant=0){
 function isWalkFromStart(opts){return (opts&&opts.parkingMode)==="none";}
 function walkStartPoint(opts){
   return {lat:opts.start.lat,lon:opts.start.lon,name:"Dein Standort (zu Fuß)",parkingScore:null,fee:"",capacity:0,walkStart:true};
+}
+
+/* "Geeignet" sofort aktualisieren (seit 0.20.3), nicht erst bei der Tourensuche */
+function updateSuitableCount(){
+  try{
+    const opts=getOpts(true);
+    if(!Number.isFinite(opts.start.lat))return;
+    const all=state.caches||[];
+    const inRadius=all.filter(c=>haversine(opts.start,c)<=opts.radius);
+    const ok=filteredCaches(opts);
+    $("#miniCandidateCount").textContent=ok.length;
+    const el=$("#suitableBreakdown");
+    if(!el)return;
+    if(!all.length){el.textContent="";return;}
+    const n=t=>inRadius.filter(t).length;
+    const parts=[
+      `${inRadius.length} von ${all.length} im Radius ${opts.radius} km`,
+      `${n(c=>c.type==="Traditional"&&!c.found)} Traditionals`,
+      `${n(c=>c.type==="Mystery"&&c.corrected&&!c.found)} gelöste Mysterys`,
+      n(c=>c.type==="Lab")?`${n(c=>c.type==="Lab"&&!c.found)} Lab-Stationen`:null,
+      n(c=>c.type==="Mystery"&&!c.corrected)?`${n(c=>c.type==="Mystery"&&!c.corrected)} ungelöste Mysterys ausgelassen`:null,
+      n(c=>c.type==="Multi")?`${n(c=>c.type==="Multi")} Multis ${opts.multis?"":"ausgelassen"}`.trim():null,
+      n(c=>!["Traditional","Mystery","Multi","Lab"].includes(c.type))?`${n(c=>!["Traditional","Mystery","Multi","Lab"].includes(c.type))} andere Typen ausgelassen`:null,
+      n(c=>c.found)?`${n(c=>c.found)} schon gefunden`:null
+    ].filter(Boolean);
+    el.textContent=parts.join(" · ");
+  }catch(e){}
 }
 
 function buildRoutes(opts){
@@ -2279,6 +2306,7 @@ function setOrigin(lat,lon,label="Gewählter Punkt",explicit=true){
   }catch(e){}
   const ps=$("#placeStatus");
   if(ps)ps.textContent=isDevice?`Suchort: dein Standort`:`Suchort: ${label}`;
+  setTimeout(updateSuitableCount,0);
   const short=isDevice?"":String(label).split(",")[0];
   for(const id of ["#gcSearchPlace","#originSearch"]){
     const el=$(id);
@@ -4296,6 +4324,7 @@ function applyLoadedCaches(caches,statusText){
   refreshCacheLayer();
   populateLogCacheSelect();
   updateTripDataStatus();
+  updateSuitableCount();
   try{refreshPersonalStats();}catch(e){}
 }
 
@@ -5210,6 +5239,7 @@ bindOptional("#originLocationBtn","click",useCurrentLocation);
 bindOptional("#originMapBtn","click",enableMapOriginPick);
 bindOptional("#originCacheAreaBtn","click",useCacheAreaOrigin);
 bindOptional("#useLocation","click",useCurrentLocation);
+["#quickRadius","#quickGap","#quickMaxTime","#quickMinCaches","#quickParkingMode"].forEach(id=>bindOptional(id,"change",updateSuitableCount));
 for(const [a,b] of [["#quickParkingMode","#parkingMode"],["#parkingMode","#quickParkingMode"]]){
   bindOptional(a,"change",()=>{
     const v=$(a).value;
