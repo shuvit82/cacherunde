@@ -11,7 +11,7 @@
 (function(){
   "use strict";
 
-  const VERSION="0.21.2";
+  const VERSION="0.22.0";
   const TILE_CACHE="cacherunde-tiles";
   const nativeFetch=window.fetch.bind(window);
 
@@ -513,6 +513,11 @@
           init={method:input.method,body:input.method!=="GET"&&input.method!=="HEAD"?await input.clone().text():undefined};
         }
         return await handler(url.searchParams,init||{});
+      }
+      // Lokale Dateien (Offline-Karte) mit dem echten WebView-fetch lesen, nicht über CapacitorHttp:
+      // nur so kommen Range-Anfragen (Teilstücke der Kartendatei) durch.
+      if(url.pathname.includes("/_capacitor_file_/")&&typeof window.CapacitorWebFetch==="function"){
+        return window.CapacitorWebFetch(input,init);
       }
     }catch(e){
       return text(e.message||String(e),500);

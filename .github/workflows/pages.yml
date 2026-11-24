@@ -3,7 +3,7 @@ name: Web-Version veröffentlichen
 on:
   push:
     branches: [main]
-    paths: ["www/**", ".github/workflows/pages.yml"]
+    paths: ["www/**", ".github/workflows/pages.yml", "scripts/vendor-libs.mjs"]
   workflow_dispatch:
 
 permissions:
@@ -23,6 +23,13 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Kartenbibliotheken in die Web-Version kopieren
+        run: |
+          npm install --no-save --no-audit --no-fund --ignore-scripts leaflet@1.9.4 protomaps-leaflet@5.1.0
+          node scripts/vendor-libs.mjs
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -8,6 +8,7 @@
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" href="icon-192.png" />
   <link rel="apple-touch-icon" href="icon-192.png" />
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -32,7 +33,7 @@
   <div id="progressText" class="progress-text">Bereit.</div>
 </div>
 <div style="background:#fff3cd;color:#664d03;border-bottom:1px solid #ffecb5;padding:8px 18px;text-align:center;font-weight:800">
-  TESTBUILD 0.21.2 · Ortsnamen und Parkplätze robuster</div>
+  TESTBUILD 0.22.0 · Offline-Karte</div>
 
   <div id="toast" class="toast hidden"></div>
 
@@ -527,6 +528,16 @@
         <div id="settingsStatus" class="muted" style="margin-top:10px">Datenformat v1 · Einstellungen werden lokal gespeichert.</div>
       </div>
 
+      <div class="card" id="offlineMapCard">
+        <h2>Offline-Karte</h2>
+        <p class="muted">Kartendatei einmal im WLAN laden, danach funktioniert die Karte ohne Netz – mit allen Wegen und Pfaden. Daten: © OpenStreetMap-Mitwirkende, Protomaps.</p>
+        <div id="offlineMapList" class="offline-map-list"><span class="muted">Noch nicht geprüft.</span></div>
+        <div id="offlineMapProgress" class="offline-map-progress hidden"><div class="bar"><span id="offlineMapBar"></span></div><span id="offlineMapProgressText"></span></div>
+        <label class="toggle-row"><input type="checkbox" id="offlineMapAuto" checked/> Offline-Karte automatisch verwenden, wenn die Karte im gespeicherten Gebiet ist</label>
+        <div class="data-actions"><button id="offlineMapRefresh" class="ghost">Verfügbare Karten abrufen</button></div>
+        <div id="offlineMapStatus" class="muted" style="margin-top:6px"></div>
+      </div>
+
       <div class="card">
         <h2>App-Version</h2>
         <p>Installiert: <strong id="installedVersion">—</strong></p>
@@ -606,7 +617,8 @@
     </article>
   </template>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script>window.L||document.write('<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""><\/script>');</script>
   <script>
 window.addEventListener("error", function(e){
   var s=document.getElementById("gpxStatus");
@@ -617,6 +629,7 @@ window.addEventListener("error", function(e){
 </script>
 <script src="gc-native.js"></script>
 <script src="api-local.js"></script>
+<script src="offline-map.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

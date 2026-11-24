@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.21.2";
+const APP_VERSION="0.22.0";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -1733,11 +1733,12 @@ function initMap(){
   if(typeof L==="undefined")throw new Error("Leaflet/Kartenbibliothek nicht geladen.");
   state.layers={caches:L.layerGroup(),route:L.layerGroup()};
   state.map=L.map("map").setView([49.39875,8.672434],12);
-  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{
+  const osm=L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{
     maxZoom:19, attribution:"© OpenStreetMap"
   }).addTo(state.map);
   state.layers.caches.addTo(state.map);
   state.layers.route.addTo(state.map);
+  try{window.CR_OFFLINE_MAP?.attach(state.map,osm);}catch(e){console.warn("Offline-Karte:",e);}
 }
 
 

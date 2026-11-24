@@ -259,3 +259,12 @@ button{min-height:42px}
 
 .suitable-breakdown{flex-basis:100%;font-size:12px;margin-top:6px}
 .hero{flex-wrap:wrap}
+
+/* Offline-Karte */
+.offline-map-list{display:flex;flex-direction:column;gap:8px;margin:8px 0}
+.offline-map-item{border:1px solid var(--line,#ddd);border-radius:10px;padding:8px 10px;display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;justify-content:space-between}
+.offline-map-item .meta{font-size:.85em;opacity:.75}
+.offline-map-item .btns{display:flex;gap:6px;flex-wrap:wrap}
+.offline-map-progress{display:flex;align-items:center;gap:8px;margin:6px 0}
+.offline-map-progress .bar{flex:1;height:8px;border-radius:4px;background:rgba(0,0,0,.1);overflow:hidden}
+.offline-map-progress .bar span{display:block;height:100%;width:0;background:#2e7d32;transition:width .3s}

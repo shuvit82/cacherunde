@@ -2,11 +2,11 @@
  * - App-Dateien: zuerst Netz (damit Updates sofort ankommen), offline aus dem Cache
  * - Kartenkacheln und Leaflet: zuerst Cache, sonst Netz (und dann speichern)
  */
-const VERSION="0.21.2";
+const VERSION="0.22.0";
 const APP_CACHE="cacherunde-app-"+VERSION;
 const TILE_CACHE="cacherunde-tiles";
 const LIB_CACHE="cacherunde-libs";
-const APP_FILES=["./","index.html","style.css","app.js","api-local.js","gc-native.js","sample.gpx","manifest.json","icon-192.png","icon-512.png"];
+const APP_FILES=["./","index.html","style.css","app.js","api-local.js","gc-native.js","offline-map.js","sample.gpx","manifest.json","icon-192.png","icon-512.png"];
 
 self.addEventListener("install",e=>{
   e.waitUntil(caches.open(APP_CACHE).then(c=>c.addAll(APP_FILES)).then(()=>self.skipWaiting()));

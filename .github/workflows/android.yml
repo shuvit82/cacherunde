@@ -30,6 +30,9 @@ jobs:
       - name: Abhängigkeiten installieren
         run: npm install --no-audit --no-fund
 
+      - name: Kartenbibliotheken in die App kopieren
+        run: node scripts/vendor-libs.mjs
+
       - name: Capacitor-Kern in die App kopieren
         run: |
           node -e '

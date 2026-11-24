@@ -4,3 +4,4 @@ node_modules/
 *.keystore
 www/capacitor.js
 www/build-info.json
+www/vendor/

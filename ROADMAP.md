@@ -14,3 +14,9 @@
 ## Weitere Ideen
 - Navigationsansicht mit Live-Standort, Richtungspfeil, Kartenvorrat fürs Gebiet.
 - Tracking im Hintergrund mit GPX-Export.
+
+## Offline-Karte (ab 0.22.0)
+- Kartendateien (PMTiles, Protomaps-Basiskarte aus OSM) erzeugt der Workflow „Offline-Karte erzeugen“ (Kreis um einen Mittelpunkt), Ablage in der Release `maps` mit Index `maps.json`.
+- Erste Karte: Otzberg + 100 km, Zoom 15, 549 MB. Hessen + BW + Bayern geschätzt 1,5–2 GB (eine Datei pro Land, GitHub-Grenze 2 GB je Datei).
+- App: Download mit @capacitor/file-transfer nach DATA/maps, Anzeige mit protomaps-leaflet über den lokalen Capacitor-Server (Range-Anfragen). Automatischer Wechsel Offline/OSM je nach Kartenmitte.
+- Später: mehrere Karten gleichzeitig, Höhenlinien/Schummerung (Mapterhorn), Outdoor-Stil mit Wanderwegen.
