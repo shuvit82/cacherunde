@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.20.6";
+const APP_VERSION="0.21.0";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -18,8 +18,7 @@ const DEFAULT_APP_SETTINGS={
 const state = {
   caches: [],
   gpxImportStats:{waypoints:0,caches:0,ignoredWaypoints:0},
-  profile: {gcUsername:"",csUsername:"",profileUrl:"https://www.geocaching.com/p/default.aspx?guid=363b1243-156e-4600-ade9-81c58d8b57b4",knownGermanyRank:52364},
-  manualStats:{},
+  profile: {gcUsername:"",csUsername:"",profileUrl:"https://www.geocaching.com/p/default.aspx?guid=363b1243-156e-4600-ade9-81c58d8b57b4"},
   pendingLogs:[],
   savedTours:[],
   activeTour:null,
@@ -4047,13 +4046,11 @@ function loadProfile(){
     state.profile={
       gcUsername:p.gcUsername||"Knorbert",
       csUsername:p.csUsername||p.gcUsername||"Knorbert",
-      profileUrl:p.profileUrl||"https://www.geocaching.com/p/default.aspx?guid=363b1243-156e-4600-ade9-81c58d8b57b4",
-      knownGermanyRank:p.knownGermanyRank!=null ? +p.knownGermanyRank : 52364
+      profileUrl:p.profileUrl||"https://www.geocaching.com/p/default.aspx?guid=363b1243-156e-4600-ade9-81c58d8b57b4"
     };
     $("#gcUsername").value=state.profile.gcUsername;
     $("#csUsername").value=state.profile.csUsername;
     $("#gcProfileUrl").value=state.profile.profileUrl;
-    $("#knownGermanyRank").value=state.profile.knownGermanyRank||"";
     $("#accountStatus").textContent=state.profile.gcUsername?`Profil: ${state.profile.gcUsername}`:"Noch kein persönliches Profil gespeichert.";
   }catch(e){}
 }
@@ -4062,73 +4059,14 @@ function saveProfile(){
   state.profile={
     gcUsername:$("#gcUsername").value.trim(),
     csUsername:$("#csUsername").value.trim()||$("#gcUsername").value.trim(),
-    profileUrl:$("#gcProfileUrl")?.value.trim()||"",
-    knownGermanyRank:$("#knownGermanyRank")?.value ? +$("#knownGermanyRank").value : null
+    profileUrl:$("#gcProfileUrl")?.value.trim()||""
   };
   localStorage.setItem("cacherunde-profile",JSON.stringify(state.profile));
   $("#accountStatus").textContent=state.profile.gcUsername?`Profil gespeichert: ${state.profile.gcUsername}`:"Profil gespeichert.";
   refreshPersonalStats();
 }
 
-async function resolveGeocachingProfile(){
-  const url=$("#gcProfileUrl")?.value.trim();
-  if(!url){
-    showToast("Bitte zuerst die Geocaching-Profil-URL eintragen.","warn");
-    return;
-  }
-  setProgress(20,"Lese öffentlichen Profilnamen …","Geocaching-Profil");
-  try{
-    const res=await fetch(`/api/geocaching-profile-public?url=${encodeURIComponent(url)}`,{cache:"no-store"});
-    const d=await res.json();
-    if(!res.ok || !d.name)throw new Error(d.message||"Profilname nicht erkannt");
-    $("#gcUsername").value=d.name;
-    if(!$("#csUsername").value.trim())$("#csUsername").value=d.name;
-    state.profile.gcUsername=d.name;
-    state.profile.csUsername=$("#csUsername").value.trim()||d.name;
-    state.profile.profileUrl=url;
-    localStorage.setItem("cacherunde-profile",JSON.stringify(state.profile));
-    showToast(`Geocaching-Profil erkannt: ${d.name}`,"success");
-    finishProgress(`Profilname erkannt: ${d.name}`);
-  }catch(e){
-    failProgress(e.message);
-    showToast(`Profilname konnte nicht erkannt werden: ${e.message}`,"error",5000);
-  }
-}
 
-function localFindStats(){
-  const username=(state.profile.gcUsername||"").trim().toLowerCase();
-  const currentYear=new Date().getFullYear();
-  const foundIds=new Set(), monthly=new Map(), yearly=new Map();
-  const types={Traditional:0,Mystery:0,Multi:0,Other:0};
-  let lastFindDate=null;
-
-  state.caches.forEach(c=>{
-    let ownFound=false, ownDate=null;
-    if(username && Array.isArray(c.logs)){
-      const ownLogs=c.logs
-        .filter(l=>(l.finder||"").trim().toLowerCase()===username && /found it/i.test(l.type||""))
-        .map(l=>({...l,_date:l.date?new Date(l.date):null}))
-        .filter(l=>!l._date || Number.isFinite(l._date.getTime()))
-        .sort((a,b)=>(b._date?.getTime()||0)-(a._date?.getTime()||0));
-      if(ownLogs.length){ownFound=true;ownDate=ownLogs[0]._date||null;}
-    }else if(!username && c.found){ownFound=true;}
-    if(!ownFound || foundIds.has(c.id))return;
-    foundIds.add(c.id);
-    if(types[c.type]!=null)types[c.type]++;else types.Other++;
-    if(ownDate){
-      if(!lastFindDate || ownDate>lastFindDate)lastFindDate=ownDate;
-      const y=ownDate.getFullYear();
-      yearly.set(y,(yearly.get(y)||0)+1);
-      const mk=`${y}-${String(ownDate.getMonth()+1).padStart(2,"0")}`;
-      monthly.set(mk,(monthly.get(mk)||0)+1);
-    }
-  });
-
-  const monthlyRows=[...monthly.entries()].sort((a,b)=>a[0].localeCompare(b[0])).slice(-12).map(([month,count])=>({month,count}));
-  const yearlyRows=[...yearly.entries()].sort((a,b)=>a[0]-b[0]).map(([year,count])=>({year:+year,count:+count}));
-  const year=yearly.get(currentYear)||0;
-  return {total:foundIds.size,year,types,lastFindDate,activeMonths:monthly.size,monthly:monthlyRows,yearly:yearlyRows};
-}
 
 function summarizeYearlyStats(rows,currentYear=new Date().getFullYear()){
   const r=(rows||[]).map(x=>({year:+x.year,count:+x.count||0}))
@@ -4171,6 +4109,50 @@ async function gcLogin(){
     showToast(`Anmeldefenster konnte nicht geöffnet werden: ${e.message}`,"error",6000);
   }
 }
+
+/* ---- Meine Statistik (seit 0.21.0): alles von geocaching.com, Ränge von Cacherstats ---- */
+async function fetchCacherstatsRanks(force=false){
+  const user=(state.profile.csUsername||state.profile.gcUsername||"").trim();
+  if(!user)return {matched:false,message:"Kein Cacherstats-Name im Profil."};
+  try{
+    const res=await fetch(`/api/cacherstats?user=${encodeURIComponent(user)}&force=${force?"1":"0"}&profileUrl=${encodeURIComponent(state.profile.profileUrl||"")}`,{cache:"no-store"});
+    return await res.json();
+  }catch(e){return {matched:false,message:e.message||String(e)};}
+}
+
+function setStat(id,v){const el=$(id);if(el)el.textContent=(v===null||v===undefined||v==="")?"—":String(v);}
+
+async function refreshPersonalStats(force=false){
+  const src=$("#statsSourceStatus");
+  if(!isNativeApp()){
+    if(src)src.textContent="Die Statistik kommt direkt von geocaching.com und Cacherstats – das geht nur in der Android-App.";
+    return;
+  }
+  setProgress(15,"Rufe Statistik von geocaching.com ab …","Meine Statistik");
+  if(src)src.textContent="Lade Statistik …";
+  const [gc,cs]=await Promise.all([fetchGcStats(state.profile.profileUrl,force),fetchCacherstatsRanks(force)]);
+
+  const yearly=gc?.yearly||[];
+  const sum=summarizeYearlyStats(yearly);
+  setStat("#statTotalFinds",gc?.totalFinds);
+  setStat("#statYearFinds",yearly.length?sum.current:null);
+  setStat("#statBestYear",sum.bestOverall?`${sum.bestOverall.year} · ${sum.bestOverall.count}`:null);
+  setStat("#statToNewRecord",yearly.length?(sum.newRecord||!sum.previousBest?"0 · Rekord!":sum.toRecord):null);
+  setStat("#statWorldRank",cs?.worldRank?`#${cs.worldRank}`:null);
+  setStat("#statGermanyRank",cs?.germanyRank?`#${cs.germanyRank}`:null);
+  renderGcStatDetails(gc?.yearly?.length?gc:null);
+
+  const parts=[];
+  if(gc?.yearly?.length)parts.push(`geocaching.com: ${gc.cached?`Zwischenspeicher (${gc.cacheAgeHours} Std.)`:"live"}`);
+  else parts.push(`geocaching.com: ${gc?.loginRequired?"nicht angemeldet":gc?.message||"keine Daten"}`);
+  if(cs?.matched)parts.push(`Cacherstats: ${cs.cached?"Zwischenspeicher":"live"}${cs.updated?` · Stand ${cs.updated}`:""}`);
+  else parts.push(`Cacherstats: ${cs?.blocked?"blockiert":cs?.message||"kein Treffer"}${cs?.debug?` (${cs.debug})`:""}`);
+  if(src)src.textContent=parts.join(" · ");
+  finishProgress("Statistik aktualisiert.");
+}
+
+// Kompatibilität: frühere Aufrufer
+function testYearStats(){return refreshPersonalStats(true);}
 
 /* ---- Caches direkt von geocaching.com (nur Android-App, seit 0.14.0) ---- */
 
@@ -4646,307 +4628,23 @@ async function initUpdateUi(){
   }
 }
 
-function parseMyFindsGpx(text,username){
-  const doc=new DOMParser().parseFromString(text,"application/xml");
-  if(doc.getElementsByTagName("parsererror").length)throw new Error("Die Datei ist kein gültiges GPX.");
-  const user=(username||"").trim().toLowerCase();
-  const FOUND=/^(found it|attended|webcam photo taken)$/i;
-  const yearly=new Map();
-  let total=0,lastDate=null,firstDate=null,withLogs=0,skipped=0;
-  for(const w of doc.getElementsByTagNameNS("*","wpt")){
-    const logs=[...w.getElementsByTagNameNS("*","log")];
-    if(!logs.length)continue;
-    withLogs++;
-    const dates=logs.filter(l=>{
-      const type=l.getElementsByTagNameNS("*","type")[0]?.textContent?.trim()||"";
-      const finder=(l.getElementsByTagNameNS("*","finder")[0]?.textContent||"").trim().toLowerCase();
-      return FOUND.test(type)&&(!user||finder===user);
-    }).map(l=>(l.getElementsByTagNameNS("*","date")[0]?.textContent||"").trim()).filter(d=>/^\d{4}-/.test(d)).sort();
-    if(!dates.length){skipped++;continue;}
-    const d=dates[0]; // erster eigener Fund dieses Caches
-    const y=+d.slice(0,4);
-    yearly.set(y,(yearly.get(y)||0)+1);
-    total++;
-    if(!lastDate||d>lastDate)lastDate=d;
-    if(!firstDate||d<firstDate)firstDate=d;
-  }
-  if(!withLogs)throw new Error("Keine Caches mit Logs gefunden. Ist das die „My Finds“-Pocket-Query?");
-  if(!total)throw new Error(`Keine Found-Logs von „${username}“ gefunden. Stimmt der Geocaching-Benutzername im Profil?`);
-  return {
-    total,
-    skipped,
-    firstDate:firstDate?.slice(0,10)||null,
-    lastDate:lastDate?.slice(0,10)||null,
-    yearly:[...yearly.entries()].sort((a,b)=>a[0]-b[0]).map(([year,count])=>({year,count}))
-  };
-}
 
-function loadMyFinds(){
-  try{return JSON.parse(localStorage.getItem("cacherunde-myfinds")||"null");}catch(e){return null;}
-}
 
-function updateMyFindsStatus(){
-  const el=$("#myFindsStatus");
-  if(!el)return;
-  const m=loadMyFinds();
-  el.textContent=m
-    ? `My Finds: ${m.total} Funde bis ${new Date(m.lastDate).toLocaleDateString("de-DE")} (importiert am ${new Date(m.importedAt).toLocaleDateString("de-DE")}).`
-    : "Noch keine „My Finds“-Pocket-Query importiert.";
-}
 
-async function importMyFinds(file){
-  try{
-    const text=await file.text();
-    const username=state.profile.gcUsername||$("#gcUsername")?.value?.trim()||"";
-    const r=parseMyFindsGpx(text,username);
-    const data={...r,fileName:file.name,importedAt:new Date().toISOString()};
-    localStorage.setItem("cacherunde-myfinds",JSON.stringify(data));
-    updateMyFindsStatus();
-    showToast(`My Finds importiert: ${r.total} Funde (${r.yearly.length} Jahre).`,"success",6000);
-    refreshPersonalStats();
-  }catch(e){
-    showToast(`My Finds konnte nicht gelesen werden: ${e.message}`,"error",7000);
-  }
-}
 
-function clearMyFinds(){
-  if(!loadMyFinds())return;
-  if(!confirm("Importierte „My Finds“-Daten löschen?"))return;
-  localStorage.removeItem("cacherunde-myfinds");
-  updateMyFindsStatus();
-  refreshPersonalStats();
-}
 
-async function resolveYearStats(local,force=false){
-  const gc=await fetchGcStats(state.profile.profileUrl,force);
-  if(gc?.yearly?.length){
-    return {
-      yearly:gc.yearly,
-      totalFinds:gc.totalFinds??null,
-      source:gc.cached?"geocaching.com (Zwischenspeicher)":"geocaching.com",
-      message:gc.message||`${gc.yearly.length} Jahre aus deiner Profilstatistik.`,
-      detail:gc
-    };
-  }
 
-  const myFinds=loadMyFinds();
-  if(myFinds?.yearly?.length){
-    const why=gc?.message?`${gc.message} `:"";
-    return {
-      yearly:myFinds.yearly,
-      totalFinds:myFinds.total,
-      source:"My Finds GPX",
-      message:`${why}Stand ${new Date(myFinds.lastDate).toLocaleDateString("de-DE")} · ohne Adventure Labs.`,
-      detail:{gc,myFinds}
-    };
-  }
 
-  if(local?.yearly?.length){
-    return {
-      yearly:local.yearly,
-      totalFinds:local.total,
-      source:"GPX Found-Logs",
-      message:`${gc?.message?gc.message+" ":""}Verwende ${local.yearly.length} Jahr(e) aus eigenen Found-Logs im normalen GPX (meist unvollständig).`,
-      detail:{gc}
-    };
-  }
 
-  return {
-    yearly:[],
-    totalFinds:null,
-    source:"keine",
-    message:gc?.message||"Keine Jahresdaten. Bei geocaching.com anmelden oder die „My Finds“-Pocket-Query importieren.",
-    detail:{gc}
-  };
-}
 
-function openProjectGcStats(){
-  const username=(state.profile.gcUsername||state.profile.csUsername||"").trim();
-  if(!username){
-    showToast("Bitte zuerst den Geocaching-Benutzernamen speichern.","warn");
-    return;
-  }
-  window.open(`https://project-gc.com/ProfileStats/${encodeURIComponent(username)}`,"_blank","noopener");
-}
 
-async function testYearStats(){
-  const btn=$("#testYearStats");
-  if(btn)btn.disabled=true;
-  setProgress(10,"Rufe Statistik von geocaching.com ab …","Jahresstatistik");
-  try{
-    const local=localFindStats();
-    const resolved=await resolveYearStats(local,true);
-    renderLocalStats(local,resolved);
-    const ys=summarizeYearlyStats(resolved.yearly||[]);
-    if(resolved.yearly?.length){
-      finishProgress(`Jahresstatistik geladen: ${resolved.source}.`);
-      showToast(
-        `${resolved.source}: ${ys.current} Funde ${new Date().getFullYear()} · bestes Jahr ${ys.bestOverall?.year??"—"} mit ${ys.bestOverall?.count??"—"} Funden.`,
-        "success",6500
-      );
-    }else{
-      failProgress(resolved.message||"Keine Jahresdaten");
-      showToast(`Jahresstatistik: ${resolved.message}`,"warn",7500);
-    }
-  }finally{
-    if(btn)btn.disabled=false;
-  }
-}
 
-function loadManualStats(){
-  try{
-    state.manualStats=JSON.parse(localStorage.getItem("cacherunde-manual-stats")||"{}");
-  }catch(e){
-    state.manualStats={};
-  }
-  const m=state.manualStats||{};
-  const set=(id,v)=>{const el=$("#"+id);if(el)el.value=v??"";};
-  set("manualTotalFinds",m.totalFinds);
-  set("manualYearFinds",m.yearFinds);
-  set("manualWorldRank",m.worldRank);
-  set("manualEuropeRank",m.europeRank);
-  set("manualGermanyRank",m.germanyRank);
-  set("manualStatsDate",m.date);
-}
 
-function saveManualStats(){
-  const num=id=>{
-    const v=$("#"+id)?.value;
-    return v===""||v==null?null:+v;
-  };
-  state.manualStats={
-    totalFinds:num("manualTotalFinds"),
-    yearFinds:num("manualYearFinds"),
-    worldRank:num("manualWorldRank"),
-    europeRank:num("manualEuropeRank"),
-    germanyRank:num("manualGermanyRank"),
-    date:$("#manualStatsDate")?.value||new Date().toISOString().slice(0,10)
-  };
-  localStorage.setItem("cacherunde-manual-stats",JSON.stringify(state.manualStats));
-  refreshPersonalStats();
-  showToast("Manuelle Statistikwerte gespeichert.","success");
-}
 
-function clearManualStats(){
-  if(!confirm("Manuell gespeicherte Statistik- und Rankingwerte löschen?"))return;
-  state.manualStats={};
-  localStorage.removeItem("cacherunde-manual-stats");
-  loadManualStats();
-  refreshPersonalStats();
-}
 
-function renderMonthlyFinds(local){
-  const host=$("#statsMonthly");
-  if(!host)return;
-  const rows=local.monthly||[];
-  if(!rows.length){
-    host.innerHTML='<div class="muted">Im importierten GPX sind keine datierten eigenen Found-Logs vorhanden.</div>';
-    return;
-  }
-  const max=Math.max(1,...rows.map(r=>r.count));
-  host.innerHTML=rows.map(r=>{
-    const h=Math.max(4,Math.round(r.count/max*60));
-    const label=r.month.slice(5)+"/"+r.month.slice(2,4);
-    return `<div class="stats-month-bar" title="${r.month}: ${r.count} Funde">
-      <strong>${r.count}</strong>
-      <div class="bar" style="height:${h}px"></div>
-      <span>${label}</span>
-    </div>`;
-  }).join("");
-}
 
-function renderLocalStats(local,yearStats=null){
-  const set=(id,v)=>{const el=$("#"+id);if(el)el.textContent=v;};
-  set("statImportedOwnFinds",local.total);
-  set("statTraditionalFinds",local.types?.Traditional||0);
-  set("statMysteryFinds",local.types?.Mystery||0);
-  set("statMultiFinds",local.types?.Multi||0);
-  set("statLastFind",local.lastFindDate?local.lastFindDate.toLocaleDateString("de-DE"):"—");
-  set("statActiveMonths",local.activeMonths||0);
-  renderMonthlyFinds(local);
 
-  const rows=yearStats?.yearly?.length?yearStats.yearly:local.yearly;
-  const ys=summarizeYearlyStats(rows);
-  set("statThisYearDetailed",rows?.length?ys.current:"—");
-  set("statBestYear",ys.bestOverall?`${ys.bestOverall.year} · ${ys.bestOverall.count}`:"—");
-  set("statToNewRecord",ys.previousBest?(ys.toRecord===0?"0 · Rekord!":ys.toRecord):"—");
 
-  const src=$("#yearStatsSource");
-  if(src){
-    const source=yearStats?.source||"keine";
-    const msg=yearStats?.message||"Keine auswertbaren Jahresdaten gefunden.";
-    src.innerHTML=`<strong>Quelle: ${escapeHtml(source)}</strong> · ${escapeHtml(msg)}`;
-  }
-}
-
-function effectiveStat(autoValue,manualValue){
-  return autoValue!=null && autoValue!=="" ? autoValue : (manualValue!=null ? manualValue : null);
-}
-
-function setCacherstatsLiveStatus(text,kind=""){
-  const el=$("#cacherstatsLiveStatus");
-  if(!el)return;
-  el.textContent=text;
-  el.className=`muted ${kind?`provider-status-${kind}`:""}`;
-}
-
-async function fetchCacherstatsRanks(username,force=false){
-  if(!username)return null;
-  const knownGermanyRank=state.profile.knownGermanyRank||($("#knownGermanyRank")?.value?+$("#knownGermanyRank").value:null);
-  const rankParam=knownGermanyRank?`&germanyRankHint=${encodeURIComponent(knownGermanyRank)}`:"";
-  const profileUrl=state.profile.profileUrl||$("#gcProfileUrl")?.value?.trim()||"";
-  const profileParam=profileUrl?`&profileUrl=${encodeURIComponent(profileUrl)}`:"";
-  const res=await fetch(`/api/cacherstats?user=${encodeURIComponent(username)}&force=${force?"1":"0"}${rankParam}${profileParam}`,{cache:"no-store"});
-  let data=null;
-  try{data=await res.json();}catch(e){}
-  if(!res.ok){
-    if(data?.message)throw new Error(data.message);
-    throw new Error(`Cacherstats HTTP ${res.status}`);
-  }
-  return data;
-}
-
-async function testCacherstatsLive(){
-  const username=($("#csUsername")?.value||state.profile.csUsername||"").trim();
-  if(!username){
-    setCacherstatsLiveStatus("Bitte zuerst einen Cacherstats-Benutzernamen eintragen.","warn");
-    return;
-  }
-  setCacherstatsLiveStatus("Teste Cacherstats Live …");
-  setProgress(20,"Teste direkten Zugriff und Browser-Fallback …","Cacherstats");
-  try{
-    const r=await fetchCacherstatsRanks(username,true);
-    if(r?.matched){
-      const source=r.cached
-        ? `lokaler Cache${r.cacheAgeDays!=null?` · ${r.cacheAgeDays} Tag(e) alt`:""}`
-        : (r.sourceMethod||"Live");
-      const hint=r.directLookup
-        ? ` · Direct Lookup${r.lookupKey?` (${r.lookupKey})`:""}`
-        : (r.usedRankHint?" · Rang-Fallback verwendet":"");
-      setCacherstatsLiveStatus(
-        `Treffer: ${r.name||username} · Quelle: ${source}${hint} · Funde ${r.finds??"—"} · Welt ${r.worldRank?`#${r.worldRank}`:"—"} · Europa ${r.europeRank?`#${r.europeRank}`:"—"} · Deutschland ${r.germanyRank?`#${r.germanyRank}`:"—"}`,
-        r.cached?"warn":"good"
-      );
-      finishProgress("Cacherstats Live funktioniert.");
-    }else if(r?.blocked){
-      setCacherstatsLiveStatus(`Cacherstats blockiert die automatische Abfrage${r.message?`: ${r.message}`:""}.`,"bad");
-      failProgress("Cacherstats blockiert die Abfrage.");
-    }else{
-      setCacherstatsLiveStatus(`Kein Treffer für „${username}“.${r?.debug?` Diagnose: ${r.debug}`:""}`,"warn");
-      finishProgress("Cacherstats erreichbar, aber kein exakter Treffer.");
-    }
-  }catch(e){
-    setCacherstatsLiveStatus(`Cacherstats-Test fehlgeschlagen: ${e.message}`,"bad");
-    failProgress(e.message);
-  }
-}
-
-function openCacherstatsBrowser(){
-  const username=($("#csUsername")?.value||state.profile.csUsername||"").trim();
-  const base="https://www.cacherstats.com/cgi-bin/RankingList.pl?Lang=EN&Loc=Germany&ROW=1";
-  const q=username?`&Name=${encodeURIComponent(username)}`:"";
-  window.open(base+q,"_blank","noopener");
-}
 
 const GC_DETAIL_LABELS={
   "Find Rate":"Fundrate","Longest Streak":"Längste Serie","Longest Slump":"Längste Pause",
@@ -4981,73 +4679,6 @@ function renderGcStatDetails(detail){
   host.innerHTML=`<h3 style="margin:14px 0 6px;font-size:15px">Von geocaching.com</h3><div class="gc-detail-list">${first}${rows}</div>${habit}`;
 }
 
-async function refreshPersonalStats(){
-  setProgress(10,"Berechne lokale Fundstatistik …","Persönliche Statistik");
-  const local=localFindStats();
-  const yearStats=await resolveYearStats(local,false);
-  renderLocalStats(local,yearStats);
-
-  setProgress(45,"Suche Cacherstats-Ranking …","Persönliche Statistik");
-  let ranks=null;
-  try{
-    ranks=await fetchCacherstatsRanks(state.profile.csUsername,false);
-  }catch(e){
-    ranks={matched:false,blocked:false,message:e.message};
-  }
-  const manual=state.manualStats||{};
-
-  const gcTotal=String(yearStats?.source||"").startsWith("geocaching.com")?yearStats.totalFinds:null;
-  const totalFinds=effectiveStat(gcTotal,effectiveStat(ranks?.finds, effectiveStat(manual.totalFinds, local.total)));
-  renderGcStatDetails(yearStats?.detail);
-  const resolvedYearSummary=summarizeYearlyStats(yearStats?.yearly||[]);
-  const resolvedCurrentYear=yearStats?.yearly?.length?resolvedYearSummary.current:null;
-  const yearFinds=effectiveStat(resolvedCurrentYear,effectiveStat(manual.yearFinds, local.year));
-  const worldRank=effectiveStat(ranks?.worldRank,manual.worldRank);
-  const europeRank=effectiveStat(ranks?.europeRank,manual.europeRank);
-  const germanyRank=effectiveStat(
-    ranks?.germanyRank,
-    effectiveStat(manual.germanyRank,state.profile.knownGermanyRank)
-  );
-
-  $("#statTotalFinds").textContent=totalFinds!=null?String(totalFinds):"—";
-  $("#statYearFinds").textContent=yearFinds!=null?String(yearFinds):"—";
-  $("#statWorldRank").textContent=worldRank?`#${worldRank}`:"—";
-  $("#statEuropeRank").textContent=europeRank?`#${europeRank}`:"—";
-  $("#statGermanyRank").textContent=germanyRank?`#${germanyRank}`:"—";
-
-  const localNote=state.profile.gcUsername
-    ? `GPX: ${local.total} eigene Funde im aktuell importierten Datenbestand erkannt, davon ${local.year??0} in ${new Date().getFullYear()}.`
-    : `GPX: ${local.total} als gefunden markierte Caches im aktuellen Import.`;
-
-  let sourceText="";
-  if(ranks?.matched){
-    const where=[
-      ranks.worldRank?`Weltweit #${ranks.worldRank}`:null,
-      ranks.europeRank?`Europa #${ranks.europeRank}`:null,
-      ranks.germanyRank?`Deutschland #${ranks.germanyRank}`:null
-    ].filter(Boolean).join(" · ");
-    const method=ranks.cached
-      ? `lokaler Cache${ranks.cacheAgeDays!=null?` (${ranks.cacheAgeDays} Tag(e) alt)`:""}`
-      : (ranks.sourceMethod||"Live");
-    sourceText=`Cacherstats ${method}: ${ranks.name||state.profile.csUsername}${where?` · ${where}`:""}${ranks.updated?` · Stand ${ranks.updated}`:""}.`;
-    setCacherstatsLiveStatus(sourceText,ranks.cached?"warn":"good");
-  }else if(ranks?.blocked){
-    sourceText=`Cacherstats blockiert aktuell die automatische Abfrage${ranks.message?`: ${ranks.message}`:""}.${state.profile.knownGermanyRank?` Deutschland #${state.profile.knownGermanyRank} wird als bekannter Referenzwert angezeigt.`:""}`;
-    setCacherstatsLiveStatus(sourceText,"bad");
-  }else if(worldRank||europeRank||germanyRank||manual.totalFinds!=null){
-    sourceText=`Cacherstats Live ohne Treffer. Gespeicherte manuelle Werte werden angezeigt${manual.date?` · Stand ${manual.date}`:""}.`;
-    setCacherstatsLiveStatus(sourceText,"warn");
-  }else{
-    sourceText=`Cacherstats erreichbar, aber kein exakter Treffer; Rankingwerte können manuell hinterlegt werden.`;
-    setCacherstatsLiveStatus(sourceText,"warn");
-  }
-
-  $("#accountStatus").textContent=`${localNote} ${sourceText}`;
-  const source=$("#statsSourceStatus");
-  if(source)source.textContent=sourceText;
-
-  finishProgress("Persönliche Statistik aktualisiert.");
-}
 
 window.addEventListener("beforeinstallprompt",e=>{
   e.preventDefault();
@@ -5200,9 +4831,7 @@ bindOptional("#savedTripSearch","input",renderSavedTrips);
 bindOptional("#savedTripSort","change",renderSavedTrips);
 bindOptional("#saveGooglePlaces","click",saveGooglePlacesSettings);
 bindOptional("#testGooglePlaces","click",testGooglePlacesConnection);
-bindOptional("#refreshStats","click",refreshPersonalStats);
-bindOptional("#testYearStats","click",testYearStats);
-bindOptional("#openProjectGcStats","click",openProjectGcStats);
+bindOptional("#refreshStats","click",()=>refreshPersonalStats(true));
 bindOptional("#gcLoginBtn","click",gcLogin);
 bindOptional("#gcLoginBtnData","click",gcLogin);
 bindOptional("#gcLoadCaches","click",loadCachesFromGeocaching);
@@ -5227,19 +4856,7 @@ window.addEventListener("cr-gc-login-closed",()=>{
 });
 setTimeout(()=>{try{initGcSearchUi();}catch(e){console.warn(e);}},300);
 if(!(window.CR_API&&window.CR_API.isNative())){$("#gcLoginBtn")?.classList.add("hidden");}
-bindOptional("#clearMyFinds","click",clearMyFinds);
-bindOptional("#myFindsInput","change",async e=>{
-  const f=e.target.files?.[0];
-  if(f)await importMyFinds(f);
-  e.target.value="";
-});
-try{updateMyFindsStatus();}catch(e){}
-bindOptional("#resolveGcProfile","click",resolveGeocachingProfile);
-bindOptional("#testCacherstats","click",testCacherstatsLive);
-bindOptional("#openCacherstats","click",openCacherstatsBrowser);
-bindOptional("#saveManualStats","click",saveManualStats);
-bindOptional("#clearManualStats","click",clearManualStats);
-bindOptional("#recalcLocalStats","click",refreshPersonalStats);
+
 bindOptional("#queueLog","click",queueLog);
 bindOptional("#sendLogs","click",uploadLogsAsDrafts);
 bindOptional("#exportLogs","click",exportFieldNotes);
@@ -5295,7 +4912,7 @@ bindOptional("#clearSavedTrips","click",()=>{
 /* Optional state modules are initialized defensively. */
 try{migrateLocalData();}catch(e){console.warn(e);}
 try{loadProfile();}catch(e){console.warn(e);}
-try{loadManualStats();}catch(e){console.warn(e);}
+
 try{loadGooglePlacesSettings();}catch(e){console.warn(e);}
 try{loadAppSettings();}catch(e){console.warn(e);}
 try{loadTourState();}catch(e){console.warn(e);}

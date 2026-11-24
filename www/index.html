@@ -15,9 +15,9 @@
   <header class="topbar">
     <div>
       <div class="brand">CacheRunde</div>
-      <div class="subtitle">Prototype 0.20.6 · Echtrouting</div>
+      <div class="subtitle">Prototype 0.21.0 · Echtrouting</div>
     </div>
-    <div style="display:flex;gap:8px;align-items:center"><span id="buildPill" class="pill" style="background:#fff;color:#0d4f37">Build 0.20.6</span><div class="top-status">
+    <div style="display:flex;gap:8px;align-items:center"><span id="buildPill" class="pill" style="background:#fff;color:#0d4f37">Build 0.21.0</span><div class="top-status">
           <span id="networkBadge" class="status-chip">Netz: …</span>
           <span id="offlineBadge" class="status-chip">Offline: …</span>
         </div>
@@ -32,7 +32,7 @@
   <div id="progressText" class="progress-text">Bereit.</div>
 </div>
 <div style="background:#fff3cd;color:#664d03;border-bottom:1px solid #ffecb5;padding:8px 18px;text-align:center;font-weight:800">
-  TESTBUILD 0.20.6 · Test-Anbieter vollständig entfernt</div>
+  TESTBUILD 0.21.0 · Eine Statistik-Karte</div>
 
   <div id="toast" class="toast hidden"></div>
 
@@ -440,98 +440,37 @@
     <section id="tab-ich" class="tab">
       <div class="card">
         <span class="eyebrow">ICH</span>
-        <h1>Mein Geocaching</h1>
+        <h2>Meine Statistik</h2>
         <div class="profile-grid">
           <div><strong id="statTotalFinds">—</strong><span>Gesamtfunde</span></div>
           <div><strong id="statYearFinds">—</strong><span>dieses Jahr</span></div>
-          <div><strong id="statWorldRank">—</strong><span>Weltweit</span></div>
-          <div><strong id="statEuropeRank">—</strong><span>Europa</span></div>
-          <div><strong id="statGermanyRank">—</strong><span>Deutschland</span></div>
+          <div><strong id="statBestYear">—</strong><span>bestes Jahr</span></div>
+          <div><strong id="statToNewRecord">—</strong><span>bis zum neuen Bestwert</span></div>
+          <div><strong id="statWorldRank">—</strong><span>Rang weltweit</span></div>
+          <div><strong id="statGermanyRank">—</strong><span>Rang Deutschland</span></div>
         </div>
         <div id="gcStatDetails"></div>
-        <div class="form-grid" style="margin-top:14px">
-          <label>Geocaching-Benutzername
-            <input id="gcUsername" type="text" placeholder="Dein Benutzername"/>
-          </label>
-          <label>Cacherstats-Benutzername
-            <input id="csUsername" type="text" placeholder="meist identisch"/>
-          </label>
-          <label class="span2">Geocaching-Profil-URL
-            <input id="gcProfileUrl" type="url" value="https://www.geocaching.com/p/default.aspx?guid=363b1243-156e-4600-ade9-81c58d8b57b4" placeholder="https://www.geocaching.com/p/default.aspx?guid=..."/>
-          </label>
-          <label>Bekannter Deutschland-Rang
-            <input id="knownGermanyRank" type="number" min="1" step="1" value="52364" placeholder="z. B. 52364"/>
-          </label>
-          <button id="resolveGcProfile" class="ghost">Profilnamen erkennen</button>
-          <button id="saveProfile" class="primary span2">Profil speichern</button>
-          <button id="refreshStats" class="ghost span2">Statistiken aktualisieren</button>
-        </div>
-        <div id="accountStatus" class="muted" style="margin-top:10px">Noch kein persönliches Profil gespeichert.</div>
-      </div>
-
-      <div class="card">
-        <span class="eyebrow">STATISTIK</span>
-        <h2>Meine Fundstatistik</h2>
-        <div class="profile-grid stats-detail-grid">
-          <div><strong id="statImportedOwnFinds">—</strong><span>Funde im importierten GPX</span></div>
-          <div><strong id="statTraditionalFinds">—</strong><span>Traditionals</span></div>
-          <div><strong id="statMysteryFinds">—</strong><span>Mysterys</span></div>
-          <div><strong id="statMultiFinds">—</strong><span>Multis</span></div>
-          <div><strong id="statLastFind">—</strong><span>Letzter Fund</span></div>
-          <div><strong id="statActiveMonths">—</strong><span>aktive Monate im GPX</span></div>
-          <div><strong id="statThisYearDetailed">—</strong><span>Funde dieses Jahr</span></div>
-          <div><strong id="statBestYear">—</strong><span>Bestes Jahr bisher</span></div>
-          <div><strong id="statToNewRecord">—</strong><span>Noch bis neuem Bestwert</span></div>
-        </div>
-
-        <div id="statsMonthly" class="stats-monthly"></div><div id="yearStatsSource" class="muted" style="margin-top:6px">Jahresstatistik noch nicht ausgewertet.</div>
+        <div id="statsSourceStatus" class="muted" style="margin-top:8px">Werte von geocaching.com, Ränge von Cacherstats.</div>
         <div class="data-actions" style="margin-top:8px">
-          <button id="testYearStats" class="ghost">Jahreswerte neu prüfen</button>
+          <button id="refreshStats" class="primary">Aktualisieren</button>
           <button id="gcLoginBtn" class="ghost">Bei geocaching.com anmelden</button>
-          <button id="openProjectGcStats" class="ghost">Project-GC Profilstatistik öffnen</button>
         </div>
-        <div class="stats-source-box">
-          <strong>„My Finds“-Pocket-Query</strong>
-          <p class="muted">Alternative ohne Login: Auf geocaching.com unter Pocket Queries „My Finds“ anfordern, die GPX-Datei aus der ZIP hier importieren. Wird nur für die Statistik verwendet, nicht für die Routensuche. Adventure Labs sind darin nicht enthalten.</p>
-          <div class="data-actions">
-            <label class="file-btn">My Finds GPX importieren<input id="myFindsInput" type="file" accept=".gpx,application/gpx+xml"/></label>
-            <button id="clearMyFinds" class="ghost">My-Finds-Daten löschen</button>
+        <details class="profile-settings" style="margin-top:10px">
+          <summary>Profil</summary>
+          <div class="form-grid" style="margin-top:8px">
+            <label>Geocaching-Benutzername
+              <input id="gcUsername" type="text" placeholder="Dein Benutzername"/>
+            </label>
+            <label>Name bei Cacherstats
+              <input id="csUsername" type="text" placeholder="meist identisch"/>
+            </label>
+            <label class="span2">Geocaching-Profil-URL
+              <input id="gcProfileUrl" type="url" value="https://www.geocaching.com/p/default.aspx?guid=363b1243-156e-4600-ade9-81c58d8b57b4" placeholder="https://www.geocaching.com/p/default.aspx?guid=..."/>
+            </label>
+            <button id="saveProfile" class="primary span2">Profil speichern</button>
           </div>
-          <div id="myFindsStatus" class="muted" style="margin-top:6px">Noch keine „My Finds“-Pocket-Query importiert.</div>
-        </div>
-
-        <div class="stats-source-box">
-          <strong>Ranking Welt / Europa / Deutschland</strong>
-          <p class="muted">Automatische Cacherstats-Abfrage wird weiterhin versucht. Falls sie blockiert wird, kannst du die Werte hier manuell hinterlegen; sie bleiben lokal gespeichert.</p>
-          <div class="form-grid">
-            <label>Gesamtfunde
-              <input id="manualTotalFinds" type="number" min="0" step="1" placeholder="z. B. 1234"/>
-            </label>
-            <label>Funde dieses Jahr
-              <input id="manualYearFinds" type="number" min="0" step="1" placeholder="z. B. 87"/>
-            </label>
-            <label>Rang weltweit
-              <input id="manualWorldRank" type="number" min="1" step="1" placeholder="z. B. 12345"/>
-            </label>
-            <label>Rang Europa
-              <input id="manualEuropeRank" type="number" min="1" step="1" placeholder="z. B. 4567"/>
-            </label>
-            <label>Rang Deutschland
-              <input id="manualGermanyRank" type="number" min="1" step="1" placeholder="z. B. 987"/>
-            </label>
-            <label>Stand
-              <input id="manualStatsDate" type="date"/>
-            </label>
-            <button id="saveManualStats" class="primary span2">Statistikwerte speichern</button>
-            <button id="clearManualStats" class="ghost span2">Manuelle Rankingwerte löschen</button>
-          </div>
-          <div class="data-actions" style="margin-top:10px">
-            <button id="testCacherstats" class="ghost">Cacherstats Live testen</button>
-            <button id="openCacherstats" class="ghost">Cacherstats im Browser öffnen</button>
-          </div>
-          <div id="cacherstatsLiveStatus" class="muted" style="margin-top:8px">Live-Provider noch nicht getestet.</div>
-          <div id="statsSourceStatus" class="muted" style="margin-top:10px">Noch keine Statistikquelle ausgewertet.</div>
-        </div>
+          <div id="accountStatus" class="muted" style="margin-top:8px"></div>
+        </details>
       </div>
 
       <div class="card">
@@ -639,13 +578,6 @@
         <div id="googlePlacesStatus" class="muted" style="margin-top:10px">Nicht konfiguriert.</div>
       </div>
 
-      <div class="card">
-        <h2>Lokale Funde</h2>
-        <p class="muted">Bis zur offiziellen API-Anbindung kann CacheRunde Funde aus importierten GPX-Daten und manuell markierten Caches zählen.</p>
-        <div class="data-actions">
-          <button id="recalcLocalStats" class="ghost">Lokale Statistik neu berechnen</button>
-        </div>
-      </div>
     </section>
   </main>
 
