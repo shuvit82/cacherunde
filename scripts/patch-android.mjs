@@ -67,4 +67,64 @@ if (fs.existsSync(bg)) {
   edit(bg, x => x.replace(/#[0-9A-Fa-f]{6,8}/, "#0D4F37"));
 }
 
+// 4) Eigenes Plugin "FileRange": liest exakt ein Stück einer Datei (für die Offline-Karte).
+//    Der lokale Capacitor-Server beachtet bei Range-Anfragen das Ende nicht und liefert bis Dateiende.
+const javaDir = path.join(appDir, "src", "main", "java", ...String(JSON.parse(fs.readFileSync(path.join(root, "capacitor.config.json"), "utf8")).appId).split("."));
+fs.mkdirSync(javaDir, { recursive: true });
+const javaPkg = JSON.parse(fs.readFileSync(path.join(root, "capacitor.config.json"), "utf8")).appId;
+fs.writeFileSync(path.join(javaDir, "FileRangePlugin.java"), `package ${javaPkg};
+
+import android.net.Uri;
+import android.util.Base64;
+import com.getcapacitor.JSObject;
+import com.getcapacitor.Plugin;
+import com.getcapacitor.PluginCall;
+import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.CapacitorPlugin;
+import java.io.RandomAccessFile;
+
+@CapacitorPlugin(name = "FileRange")
+public class FileRangePlugin extends Plugin {
+    @PluginMethod
+    public void read(PluginCall call) {
+        String p = call.getString("path");
+        if (p == null) { call.reject("path fehlt"); return; }
+        if (p.startsWith("file:")) p = Uri.parse(p).getPath();
+        long offset = call.getData().optLong("offset", 0);
+        int length = call.getData().optInt("length", 0);
+        if (length < 0 || length > 16 * 1024 * 1024) { call.reject("length ungueltig"); return; }
+        try (RandomAccessFile f = new RandomAccessFile(p, "r")) {
+            long size = f.length();
+            int n = (int) Math.max(0, Math.min((long) length, size - offset));
+            byte[] buf = new byte[n];
+            if (n > 0) { f.seek(offset); f.readFully(buf); }
+            JSObject ret = new JSObject();
+            ret.put("data", Base64.encodeToString(buf, Base64.NO_WRAP));
+            ret.put("size", size);
+            ret.put("bytes", n);
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject("Lesen fehlgeschlagen: " + e.getMessage());
+        }
+    }
+}
+`);
+const mainActivity = path.join(javaDir, "MainActivity.java");
+edit(mainActivity, j => {
+  if (j.includes("FileRangePlugin")) return j;
+  if (!j.includes("import android.os.Bundle;")) j = j.replace(/(package [^;]+;)/, "$1\n\nimport android.os.Bundle;");
+  return j.replace(/public class MainActivity extends BridgeActivity\s*\{\s*\}/,
+`public class MainActivity extends BridgeActivity {
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        registerPlugin(FileRangePlugin.class);
+        super.onCreate(savedInstanceState);
+    }
+}`);
+});
+if (!fs.readFileSync(mainActivity, "utf8").includes("registerPlugin(FileRangePlugin.class)")) {
+  console.error("MainActivity konnte nicht angepasst werden:\n" + fs.readFileSync(mainActivity, "utf8"));
+  process.exit(1);
+}
+
 console.log(`Android-Projekt angepasst: Version ${pkg.version} (${versionCode})${keystore ? ", signiert" : ", Debug-Signatur"}`);

@@ -33,7 +33,7 @@
   <div id="progressText" class="progress-text">Bereit.</div>
 </div>
 <div style="background:#fff3cd;color:#664d03;border-bottom:1px solid #ffecb5;padding:8px 18px;text-align:center;font-weight:800">
-  TESTBUILD 0.22.0 · Offline-Karte, Cacherstats-Ränge</div>
+  TESTBUILD 0.22.1 · Offline-Karte, Routing-Ausweich</div>
 
   <div id="toast" class="toast hidden"></div>
 
@@ -573,6 +573,19 @@
           <button id="openDrafts" class="ghost">Entwürfe auf geocaching.com öffnen</button>
           <button id="clearUploadedLogs" class="ghost">Hochgeladene ausblenden</button>
         </div>
+      </div>
+
+      <div class="card" id="routingCard">
+        <h2>Routing</h2>
+        <p class="muted">Fußwege kommen kostenlos von FOSSGIS (OSRM, bei Ausfall Valhalla). Optional zuverlässiger: Geoapify – kostenloser Schlüssel mit 3.000 Anfragen pro Tag unter myprojects.geoapify.com. Ist ein Schlüssel eingetragen, wird Geoapify zuerst gefragt. Der Schlüssel bleibt nur auf diesem Gerät.</p>
+        <div class="form-grid">
+          <label class="span2">Geoapify API-Key
+            <input id="geoapifyKey" type="password" placeholder="optional" autocomplete="off"/>
+          </label>
+          <button id="saveGeoapify" class="primary">Speichern</button>
+          <button id="testRouting" class="ghost">Routing testen</button>
+        </div>
+        <div id="routingStatus" class="muted" style="margin-top:10px"></div>
       </div>
 
       <div class="card">

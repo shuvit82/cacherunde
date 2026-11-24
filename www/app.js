@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.22.0";
+const APP_VERSION="0.22.1";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -749,6 +749,10 @@ async function footRouteRequest(points, steps=false){
   const data=await res.json();
   const route=data?.routes?.[0];
   if(data?.code!=="Ok" || !route)throw new Error(data?.message||data?.code||"Keine Fußroute");
+  if(data.provider){
+    state.lastFootProvider=data.provider;
+    const st=$("#routingStatus");if(st)st.textContent=`Zuletzt verwendet: ${data.provider}`;
+  }
   if(!route.geometry || !Array.isArray(route.geometry.coordinates)){
     throw new Error("Fußrouting lieferte keine gültige Geometrie.");
   }
@@ -2131,7 +2135,7 @@ function showRouteOnMap(r){
       .bindPopup(cachePopupHtml(p,i))
       .addTo(state.layers.route);
   });
-  const b=L.latLngBounds(latlngs); state.map.fitBounds(b.pad(.2));
+  fitMapTo(L.latLngBounds(latlngs).pad(.15));
   const mode=r.real?"Echtroute":"Vorprüfung";
   const elevationBlock=r.real?.elevation
     ? `<div style="width:100%;margin-top:8px"><div class="pill real-badge">Höhenprofil verfügbar</div>${elevationSvg(r.real.elevation)}</div>`
@@ -2220,10 +2224,25 @@ async function search(quick=false){
   );
 }
 
+// Karte auf einen Bereich zoomen. Ist der Karten-Reiter gerade verborgen (Größe 0), würde fitBounds
+// falsch rechnen – dann merken und nach dem Einblenden (switchTab) nachholen.
+function fitMapTo(bounds){
+  if(!state.map||!bounds?.isValid?.())return;
+  state.pendingFit=bounds;
+  const el=state.map.getContainer();
+  if(el&&el.offsetWidth>0&&el.offsetHeight>0){
+    state.map.invalidateSize();
+    state.map.fitBounds(bounds,{maxZoom:17});
+    state.pendingFit=null;
+  }
+}
 function switchTab(name){
   $$(".tab").forEach(t=>t.classList.toggle("active",t.id===`tab-${name}`));
   $$(".nav-btn").forEach(b=>b.classList.toggle("active",b.dataset.tab===name));
-  if(name==="karte" && state.map) setTimeout(()=>state.map?.invalidateSize(),60);
+  if(name==="karte" && state.map) setTimeout(()=>{
+    state.map?.invalidateSize();
+    if(state.pendingFit){const b=state.pendingFit;state.pendingFit=null;state.map.fitBounds(b,{maxZoom:17});}
+  },60);
 }
 
 async function loadGPXFile(file){
@@ -4825,11 +4844,31 @@ bindOptional("#mapPlanCalculate","click",calculateMapPlanner);
 bindOptional("#mapPlanClear","click",clearMapPlanner);
 bindOptional("#mapPlanCancel","click",cancelMapPlanner);
 
+(function initRoutingCard(){
+  const inp=$("#geoapifyKey"),st=$("#routingStatus");
+  if(!inp)return;
+  try{inp.value=localStorage.getItem("cacherunde-geoapify-key")||"";}catch(e){}
+  if(st)st.textContent=inp.value?"Geoapify-Schlüssel gespeichert – wird zuerst verwendet.":"Kein Geoapify-Schlüssel – FOSSGIS wird verwendet.";
+  bindOptional("#saveGeoapify","click",()=>{
+    try{localStorage.setItem("cacherunde-geoapify-key",inp.value.trim());}catch(e){}
+    if(st)st.textContent=inp.value.trim()?"Geoapify-Schlüssel gespeichert – wird zuerst verwendet.":"Schlüssel entfernt – FOSSGIS wird verwendet.";
+    showToast("Routing-Einstellung gespeichert.","success");
+  });
+  bindOptional("#testRouting","click",async()=>{
+    if(st)st.textContent="Teste Routing …";
+    const a={lat:49.8300,lon:8.8800},b={lat:49.8360,lon:8.8950};
+    const t0=Date.now();
+    try{
+      const r=await footRouteRequest([a,b],false);
+      if(st)st.textContent=`OK über ${state.lastFootProvider||"?"}: ${(r.distance/1000).toFixed(2)} km in ${((Date.now()-t0)/1000).toFixed(1)} s`;
+    }catch(e){if(st)st.textContent="Fehler: "+(e.message||e);}
+  });
+})();
+
 bindOptional("#fitMap","click",()=>{
   if(state.selectedRoute)showRouteOnMap(state.selectedRoute);
   else if(state.caches.length&&state.map){
-    const b=L.latLngBounds(state.caches.map(c=>[c.lat,c.lon]));
-    state.map.fitBounds(b.pad(.2));
+    fitMapTo(L.latLngBounds(state.caches.map(c=>[c.lat,c.lon])).pad(.2));
   }
 });
 bindOptional("#offlineCurrent","click",()=>alert("Angezeigte Kartenausschnitte werden automatisch auf dem Gerät gespeichert und sind danach auch offline verfügbar."));

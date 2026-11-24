@@ -11,7 +11,7 @@
 (function(){
   "use strict";
 
-  const VERSION="0.22.0";
+  const VERSION="0.22.1";
   const TILE_CACHE="cacherunde-tiles";
   const nativeFetch=window.fetch.bind(window);
 
@@ -125,6 +125,60 @@
     throw new Error(`${label||new URL(url).hostname} nach ${tries} Versuchen fehlgeschlagen (${last})`);
   }
 
+  /* ---------- Fußrouting: mehrere Anbieter nacheinander ---------- */
+  function geoapifyKey(){
+    try{return (localStorage.getItem("cacherunde-geoapify-key")||"").trim();}catch(e){return "";}
+  }
+  // Immer nur eine Routing-Anfrage gleichzeitig: schont die kostenlosen Server (weniger 502/429)
+  let footChain=Promise.resolve();
+  function footQueue(fn){
+    const run=footChain.then(fn,fn);
+    footChain=run.catch(()=>{});
+    return run;
+  }
+  function joinLines(lines){
+    const out=[];
+    for(const l of lines){if(!l?.length)continue;out.push(...(out.length?l.slice(1):l));}
+    return out;
+  }
+  async function footOsrm(coords,steps,tries){
+    const geom=steps?"geojson":"polyline6";
+    const url=`https://routing.openstreetmap.de/routed-foot/route/v1/driving/${coords}?overview=full&geometries=${geom}&steps=${steps}`;
+    const r=await fetchRetry(url,{headers:{"Accept":"application/json"}},{tries,timeout:30000,label:"OSRM"});
+    const data=await r.json();
+    if(data.code==="Ok"&&!steps){
+      for(const rt of data.routes||[])
+        if(typeof rt.geometry==="string")rt.geometry={type:"LineString",coordinates:decodePolyline6(rt.geometry)};
+    }
+    return data;
+  }
+  async function footValhalla(pts){
+    const body=JSON.stringify({locations:pts.map(([lon,lat])=>({lat,lon})),costing:"pedestrian",directions_type:"none"});
+    const r=await fetchRetry("https://valhalla1.openstreetmap.de/route",
+      {method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body},{tries:2,timeout:30000,label:"Valhalla"});
+    const d=await r.json();
+    const legs=d?.trip?.legs;
+    if(!legs?.length)return {code:"NoRoute",message:d?.error||"keine Route"};
+    const routeLegs=legs.map(l=>({distance:(l.summary?.length||0)*1000,duration:l.summary?.time||0}));
+    return {code:"Ok",routes:[{
+      distance:routeLegs.reduce((a,l)=>a+l.distance,0),duration:routeLegs.reduce((a,l)=>a+l.duration,0),legs:routeLegs,
+      geometry:{type:"LineString",coordinates:joinLines(legs.map(l=>decodePolyline6(l.shape||"")))}
+    }]};
+  }
+  async function footGeoapify(pts,apiKey){
+    const wp=pts.map(([lon,lat])=>`${lat},${lon}`).join("|");
+    const url=`https://api.geoapify.com/v1/routing?waypoints=${encodeURIComponent(wp)}&mode=walk&apiKey=${encodeURIComponent(apiKey)}`;
+    const r=await fetchRetry(url,{headers:{"Accept":"application/json"}},{tries:2,timeout:30000,label:"Geoapify"});
+    const d=await r.json();
+    const f=d?.features?.[0];
+    if(!f)return {code:"NoRoute",message:d?.message||"keine Route"};
+    const g=f.geometry||{};
+    const lines=g.type==="MultiLineString"?g.coordinates:[g.coordinates||[]];
+    const routeLegs=(f.properties?.legs||[]).map(l=>({distance:l.distance||0,duration:l.time||0}));
+    return {code:"Ok",routes:[{distance:f.properties?.distance||0,duration:f.properties?.time||0,legs:routeLegs,
+      geometry:{type:"LineString",coordinates:joinLines(lines)}}]};
+  }
+
   // Google-Polyline mit 6 Nachkommastellen → [[lon,lat],...]
   function decodePolyline6(str){
     let i=0,lat=0,lng=0;const out=[];
@@ -171,24 +225,26 @@
         footCache.delete(key);footCache.set(key,hit); // zuletzt benutzt nach hinten
         return json(hit);
       }
-      // Ohne Schritte: kompaktes polyline6 statt GeoJSON (ca. 4x kleiner), danach zurückwandeln.
-      const geom=steps?"geojson":"polyline6";
-      const url=`https://routing.openstreetmap.de/routed-foot/route/v1/driving/${coords}?overview=full&geometries=${geom}&steps=${steps}`;
-      try{
-        const r=await fetchRetry(url,{headers:{"Accept":"application/json"}},{label:"Fußrouting"});
-        const data=await r.json();
-        if(data.code!=="Ok")return json(data,200);
-        if(!steps){
-          for(const rt of data.routes||[]){
-            if(typeof rt.geometry==="string")rt.geometry={type:"LineString",coordinates:decodePolyline6(rt.geometry)};
+      const pts=coords.split(";").map(c=>c.split(",").map(Number)); // [lon,lat]
+      const gKey=geoapifyKey();
+      const providers=[];
+      if(gKey)providers.push(["Geoapify",()=>footGeoapify(pts,gKey)]);
+      providers.push(["FOSSGIS OSRM",()=>footOsrm(coords,steps,gKey?2:3)]);
+      providers.push(["FOSSGIS Valhalla",()=>footValhalla(pts)]);
+      const errors=[];
+      for(const [name,run] of providers){
+        try{
+          const data=await footQueue(run);
+          if(data&&data.code==="Ok"&&data.routes?.length){
+            data.provider=name;
+            footCache.set(key,data);
+            if(footCache.size>FOOT_CACHE_MAX)footCache.delete(footCache.keys().next().value);
+            return json(data);
           }
-        }
-        footCache.set(key,data);
-        if(footCache.size>FOOT_CACHE_MAX)footCache.delete(footCache.keys().next().value);
-        return json(data);
-      }catch(e){
-        return text(e.message||String(e),502);
+          errors.push(`${name}: ${data?.message||data?.code||"keine Route"}`);
+        }catch(e){errors.push(`${name}: ${e.message||e}`);}
       }
+      return text("Kein Routing-Dienst erreichbar – "+errors.join(" · "),502);
     },
 
     async "/api/car"(q){

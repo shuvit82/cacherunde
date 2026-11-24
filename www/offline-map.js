@@ -51,14 +51,48 @@
   }
   const FS=()=>plugin("Filesystem");
   const FT=()=>plugin("FileTransfer");
+  const FR=()=>plugin("FileRange");
+
+  /* Kartendatei stückweise lesen. Der lokale Capacitor-Server liefert bei Range-Anfragen ab der
+     Startposition bis zum Dateiende – bei 549 MB unbrauchbar. Deshalb fangen wir Anfragen an
+     <origin>/_crmap/<datei> ab und lesen genau die gewünschten Bytes über das Plugin FileRange. */
+  const MAP_PREFIX="/_crmap/";
+  const uriCache=new Map();
+  function b64ToBytes(b64){
+    const bin=atob(b64||"");const out=new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++)out[i]=bin.charCodeAt(i);
+    return out;
+  }
+  async function readRange(file,offset,length){
+    let uri=uriCache.get(file);
+    if(!uri){uri=await fileUri(file);uriCache.set(file,uri);}
+    const r=await FR().read({path:uri,offset,length});
+    return {bytes:b64ToBytes(r.data),size:Number(r.size)};
+  }
+  const prevFetch=window.fetch;
+  window.fetch=async function(input,init){
+    const raw=typeof input==="string"?input:(input&&input.url)||String(input);
+    if(raw.includes(MAP_PREFIX)){
+      const file=decodeURIComponent(new URL(raw,location.href).pathname.split(MAP_PREFIX)[1]||"");
+      const h=new Headers((init&&init.headers)||(input&&input.headers)||{});
+      const m=/bytes=(\d+)-(\d*)/.exec(h.get("range")||"");
+      const offset=m?+m[1]:0;
+      const length=m&&m[2]?(+m[2]-offset+1):16384;
+      try{
+        const {bytes,size}=await readRange(file,offset,length);
+        return new Response(bytes,{status:206,headers:{"Content-Type":"application/octet-stream",
+          "Content-Length":String(bytes.length),"Content-Range":`bytes ${offset}-${offset+bytes.length-1}/${size}`}});
+      }catch(e){
+        return new Response(String(e.message||e),{status:500});
+      }
+    }
+    return prevFetch.call(this,input,init);
+  };
+  function mapUrl(file){return location.origin+MAP_PREFIX+encodeURIComponent(file);}
 
   async function fileUri(file){
     const r=await FS().getUri({directory:DIR,path:"maps/"+file});
     return r.uri;
-  }
-  function webUrl(uri){
-    const c=window.Capacitor;
-    return c&&typeof c.convertFileSrc==="function"?c.convertFileSrc(uri):uri;
   }
 
   /* ---------- Hilfen ---------- */
@@ -101,18 +135,15 @@
   }
 
   /* Prüft, ob die Datei stückweise gelesen werden kann (Voraussetzung für die Anzeige). */
-  async function probe(url){
-    const f=typeof window.CapacitorWebFetch==="function"?window.CapacitorWebFetch:fetch;
-    const r=await f(url,{headers:{Range:"bytes=0-6"}});
-    const len=Number(r.headers.get("content-length")||0);
-    if(r.status!==206&&(len===0||len>64)){
-      try{r.body&&r.body.cancel();}catch(e){}
-      throw new Error("Lokaler Server liefert keine Teilstücke (HTTP "+r.status+").");
-    }
-    const buf=new Uint8Array(await r.arrayBuffer());
-    const magic=String.fromCharCode(...buf.slice(0,7));
-    if(magic!=="PMTiles")throw new Error(`Kartendatei unlesbar (HTTP ${r.status}, Kennung „${magic}“).`);
-    return r.status;
+  /* Prüft die gespeicherte Datei: Kennung am Anfang und ein Stück am Ende (Springen in der Datei). */
+  async function probe(file){
+    if(!FR())throw new Error("Kartenleser fehlt in dieser App-Version (neue APK nötig).");
+    const head=await readRange(file,0,127);
+    const magic=String.fromCharCode(...head.bytes.slice(0,7));
+    if(magic!=="PMTiles")throw new Error(`Kartendatei unlesbar (Kennung „${magic}“).`);
+    const tail=await readRange(file,Math.max(0,head.size-16),16);
+    if(tail.bytes.length!==Math.min(16,head.size))throw new Error("Kartendatei: Ende nicht lesbar.");
+    return head.size;
   }
 
   /* ---------- Karte ---------- */
@@ -147,8 +178,9 @@
     if(!m)return;
     try{
       await loadLib();
-      const url=webUrl(await fileUri(m.file));
-      await probe(url);
+      uriCache.delete(m.file);
+      await probe(m.file);
+      const url=mapUrl(m.file);
       offLayer=protomapsL.leafletLayer({
         url, flavor:"light", lang:"de", maxDataZoom:m.maxzoom||15, maxZoom:20,
         attribution:'© <a href="https://openstreetmap.org/copyright">OpenStreetMap</a> · <a href="https://protomaps.com">Protomaps</a>'
@@ -160,7 +192,9 @@
       status(`Offline-Karte aktiv: ${m.name}`);
     }catch(e){
       offLayer=null;offMeta=null;
-      status("Offline-Karte konnte nicht angezeigt werden: "+(e.message||e));
+      const msg="Offline-Karte konnte nicht angezeigt werden: "+(e.message||e);
+      status(msg);
+      try{window.showToast&&window.showToast(msg,"warn",7000);}catch(x){}
     }
   }
 
@@ -241,7 +275,8 @@
       if(map&&offLayer&&map.hasLayer(offLayer))map.removeLayer(offLayer);
       try{await fs.deleteFile({directory:DIR,path:"maps/"+m.file});}catch(e){}
       await fs.rename({directory:DIR,from:"maps/"+part,toDirectory:DIR,to:"maps/"+m.file});
-      await probe(webUrl(await fileUri(m.file)));
+      uriCache.delete(m.file);
+      await probe(m.file);
       // erst einmal nur eine Karte gleichzeitig verwenden
       for(const old of installed().filter(x=>x.id!==m.id&&x.file!==m.file)){
         try{await fs.deleteFile({directory:DIR,path:"maps/"+old.file});}catch(e){}
