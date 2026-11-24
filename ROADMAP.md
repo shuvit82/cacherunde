@@ -20,3 +20,7 @@
 - Erste Karte: Otzberg + 100 km, Zoom 15, 549 MB. Hessen + BW + Bayern geschätzt 1,5–2 GB (eine Datei pro Land, GitHub-Grenze 2 GB je Datei).
 - App: Download mit @capacitor/file-transfer nach DATA/maps, Anzeige mit protomaps-leaflet über den lokalen Capacitor-Server (Range-Anfragen). Automatischer Wechsel Offline/OSM je nach Kartenmitte.
 - Später: mehrere Karten gleichzeitig, Höhenlinien/Schummerung (Mapterhorn), Outdoor-Stil mit Wanderwegen.
+
+## Cacherstats (gelöst in 0.22.0)
+- RankingList.pl nimmt POST Lang=EN, Loc=World|Germany, MA=1, RPP, CACHER=<Name> – ohne Login/Cookies.
+- Namenssuche nur bei exakter Schreibweise (Groß/klein). Rückfall: CACHES=<gc-Fundzahl+2>, RPP=500 (bis 2 Seiten), Vergleich ohne Groß/klein oder per Profil-GUID im Link.

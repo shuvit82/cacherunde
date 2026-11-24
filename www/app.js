@@ -4114,11 +4114,11 @@ async function gcLogin(){
 }
 
 /* ---- Meine Statistik (seit 0.21.0): alles von geocaching.com, Ränge von Cacherstats ---- */
-async function fetchCacherstatsRanks(force=false){
+async function fetchCacherstatsRanks(force=false,finds=null){
   const user=(state.profile.csUsername||state.profile.gcUsername||"").trim();
   if(!user)return {matched:false,message:"Kein Cacherstats-Name im Profil."};
   try{
-    const res=await fetch(`/api/cacherstats?user=${encodeURIComponent(user)}&force=${force?"1":"0"}&profileUrl=${encodeURIComponent(state.profile.profileUrl||"")}`,{cache:"no-store"});
+    const res=await fetch(`/api/cacherstats?user=${encodeURIComponent(user)}&force=${force?"1":"0"}&profileUrl=${encodeURIComponent(state.profile.profileUrl||"")}${finds?`&finds=${finds}`:""}`,{cache:"no-store"});
     return await res.json();
   }catch(e){return {matched:false,message:e.message||String(e)};}
 }
@@ -4133,7 +4133,9 @@ async function refreshPersonalStats(force=false){
   }
   setProgress(15,"Rufe Statistik von geocaching.com ab …","Meine Statistik");
   if(src)src.textContent="Lade Statistik …";
-  const [gc,cs]=await Promise.all([fetchGcStats(state.profile.profileUrl,force),fetchCacherstatsRanks(force)]);
+  const gc=await fetchGcStats(state.profile.profileUrl,force);
+  setProgress(60,"Rufe Ranglisten von Cacherstats ab …","Meine Statistik");
+  const cs=await fetchCacherstatsRanks(force,gc?.totalFinds||null);
 
   const yearly=gc?.yearly||[];
   const sum=summarizeYearlyStats(yearly);
