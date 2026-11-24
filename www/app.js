@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.20.4";
+const APP_VERSION="0.20.5";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -2406,13 +2406,8 @@ class MockGeocachingProvider{
     await sleep(700);
     if(!this.connected)throw new Error("Provider nicht verbunden");
     let finals=0,found=0;
-    caches.forEach((c,i)=>{
-      if(this.profile!=="empty" && i%11===0){c.found=true;found++;}
-      if(c.type==="Mystery" && !c.corrected && i%7===0){
-        c.corrected=true;
-        finals++;
-      }
-    });
+    // Früher markierte dieser Test-Anbieter zufällig Caches als gefunden bzw. Mysterys als gelöst.
+    // Das verfälschte echte Daten und ist entfernt (0.20.5).
     return {foundUpdated:found,finalsUpdated:finals};
   }
   async submitLog(entry){
@@ -3308,6 +3303,14 @@ async function removeCacheFromSelectedRoute(cacheId){
 window.cacheRundeRemoveFromRoute=(cacheId)=>removeCacheFromSelectedRoute(cacheId);
 
 
+function correctedInfoHtml(cache){
+  if(cache.correctedSource==="geocaching.com"&&Number.isFinite(+cache.postedLat)){
+    const m=Math.round(haversine({lat:+cache.postedLat,lon:+cache.postedLon},cache)*1000);
+    return `Gelöst ✓ <span class="muted">– deine korrigierten Koordinaten auf geocaching.com, ${m>=1000?(m/1000).toFixed(1)+" km":m+" m"} vom Listing · <a href="https://coord.info/${encodeURIComponent(cache.id)}" target="_blank" rel="noopener">Listing</a></span>`;
+  }
+  return `Final vorhanden ✓ <span class="muted">– aus der GPX-Datei</span>`;
+}
+
 function cachePopupHtml(cache,index=null){
   const isDone=state.activeTour?.completedCacheIds?.includes(cache.id);
   const safeId=String(cache.id).replace(/'/g,"\\'");
@@ -3336,7 +3339,7 @@ function cachePopupHtml(cache,index=null){
     ${cache.type==="Lab"
       ? `Adventure-Lab-Station${cache.adventure?` · ${escapeHtml(cache.adventure)}`:""}<br><span class="muted">Loggen in der Adventure-Lab-App</span><br>`
       : `${escapeHtml(cache.id)} · ${escapeHtml(cache.type)}<br>D ${cache.difficulty??"—"} · T ${cache.terrain??"—"}<br>`}
-    ${cache.corrected?"Final vorhanden ✓":""}
+    ${cache.corrected?correctedInfoHtml(cache):""}
     ${warning}
     ${routeEdit}
     ${cache.type==="Lab"?labPopupActions(cache):`<div class="cache-detail-actions">
@@ -4300,6 +4303,7 @@ function gcResultToCache(r){
     rawCacheType:raw,
     found:!!r.found,
     corrected:!!r.corrected,
+    correctedSource:r.corrected?"geocaching.com":null,
     logs,
     ele:null,
     difficulty:Number.isFinite(+r.difficulty)?+r.difficulty:null,

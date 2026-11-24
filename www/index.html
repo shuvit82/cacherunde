@@ -15,9 +15,9 @@
   <header class="topbar">
     <div>
       <div class="brand">CacheRunde</div>
-      <div class="subtitle">Prototype 0.20.4 · Echtrouting</div>
+      <div class="subtitle">Prototype 0.20.5 · Echtrouting</div>
     </div>
-    <div style="display:flex;gap:8px;align-items:center"><span id="buildPill" class="pill" style="background:#fff;color:#0d4f37">Build 0.20.4</span><div class="top-status">
+    <div style="display:flex;gap:8px;align-items:center"><span id="buildPill" class="pill" style="background:#fff;color:#0d4f37">Build 0.20.5</span><div class="top-status">
           <span id="networkBadge" class="status-chip">Netz: …</span>
           <span id="offlineBadge" class="status-chip">Offline: …</span>
         </div>
@@ -32,7 +32,7 @@
   <div id="progressText" class="progress-text">Bereit.</div>
 </div>
 <div style="background:#fff3cd;color:#664d03;border-bottom:1px solid #ffecb5;padding:8px 18px;text-align:center;font-weight:800">
-  TESTBUILD 0.20.4 · Nur gelöste Mysterys</div>
+  TESTBUILD 0.20.5 · Test-Anbieter entfernt</div>
 
   <div id="toast" class="toast hidden"></div>
 
@@ -586,30 +586,6 @@
           <label class="file-btn">Backup importieren<input id="importBackup" type="file" accept=".json,application/json"/></label>
         </div>
         <div id="settingsStatus" class="muted" style="margin-top:10px">Datenformat v1 · Einstellungen werden lokal gespeichert.</div>
-      </div>
-
-      <div class="card">
-        <h2>Geocaching Provider</h2>
-        <p class="muted">0.20.4 enthält einen realistischen Test Provider für Profil, Funde, Mystery-Finals und Logs. Er nutzt lokale Test-/GPX-Daten und kann später gegen eine autorisierte Schnittstelle ausgetauscht werden.</p>
-        <div class="form-grid">
-          <label>Provider
-            <select id="gcProvider">
-              <option value="mock" selected>Test Provider</option>
-              <option value="official" disabled>Offizielle API (später)</option>
-            </select>
-          </label>
-          <label>Testprofil
-            <select id="mockProfile">
-              <option value="normal">Standardprofil</option>
-              <option value="premium">Premiumprofil</option>
-              <option value="empty">Leeres Profil</option>
-            </select>
-          </label>
-          <button id="connectGc" class="primary">Test Provider verbinden</button>
-          <button id="disconnectGc" class="ghost">Verbindung trennen</button>
-          <button id="syncGc" class="ghost span2">Synchronisieren</button>
-        </div>
-        <div id="gcApiStatus" class="muted" style="margin-top:10px">Nicht verbunden.</div>
       </div>
 
       <div class="card">
