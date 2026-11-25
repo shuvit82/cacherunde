@@ -21,12 +21,19 @@ edit(path.join(appDir, "src", "main", "AndroidManifest.xml"), xml => {
   const perms = [
     "android.permission.ACCESS_COARSE_LOCATION",
     "android.permission.ACCESS_FINE_LOCATION",
+    "android.permission.FOREGROUND_SERVICE",
+    "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
+    "android.permission.POST_NOTIFICATIONS",
   ].filter(p => !xml.includes(p))
    .map(p => `    <uses-permission android:name="${p}" />`).join("\n");
   if (perms) xml = xml.replace(/<\/manifest>\s*$/, `${perms}\n</manifest>\n`);
   // Android 11+: Adventure-Lab-App muss sichtbar sein, damit sie per Paketname geöffnet werden kann
   if (!xml.includes("com.groundspeak.react.adventures")) {
     xml = xml.replace(/<\/manifest>\s*$/, `    <queries>\n        <package android:name="com.groundspeak.react.adventures" />\n    </queries>\n</manifest>\n`);
+  }
+  // Vordergrund-Dienst, der die App während langer Routenberechnungen am Leben hält
+  if (!xml.includes(".RoutingService")) {
+    xml = xml.replace(/<\/application>/, `    <service android:name=".RoutingService" android:exported="false" android:foregroundServiceType="dataSync" />\n    </application>`);
   }
   return xml;
 });
@@ -109,6 +116,131 @@ public class FileRangePlugin extends Plugin {
     }
 }
 `);
+// 5) Plugin "KeepAlive": Vordergrund-Dienst während der Routenberechnung + Benachrichtigung „Route fertig“
+fs.writeFileSync(path.join(javaDir, "RoutingService.java"), `package ${javaPkg};
+
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.app.Service;
+import android.content.Context;
+import android.content.Intent;
+import android.content.pm.ServiceInfo;
+import android.os.Build;
+import android.os.IBinder;
+
+public class RoutingService extends Service {
+    static final String CHANNEL_RUN = "routing_run";
+    static final String CHANNEL_DONE = "routing_done";
+    static final int ID_RUN = 4711;
+
+    static void channels(Context c) {
+        if (Build.VERSION.SDK_INT < 26) return;
+        NotificationManager nm = c.getSystemService(NotificationManager.class);
+        nm.createNotificationChannel(new NotificationChannel(CHANNEL_RUN, "Routenberechnung läuft", NotificationManager.IMPORTANCE_LOW));
+        nm.createNotificationChannel(new NotificationChannel(CHANNEL_DONE, "Route fertig", NotificationManager.IMPORTANCE_DEFAULT));
+    }
+
+    static PendingIntent openApp(Context c) {
+        Intent i = c.getPackageManager().getLaunchIntentForPackage(c.getPackageName());
+        if (i == null) i = new Intent();
+        i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        return PendingIntent.getActivity(c, 0, i, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+    }
+
+    static Notification.Builder builder(Context c, String channel) {
+        Notification.Builder b = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(c, channel) : new Notification.Builder(c);
+        return b.setSmallIcon(c.getApplicationInfo().icon).setContentIntent(openApp(c));
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        channels(this);
+        String text = intent != null ? intent.getStringExtra("text") : null;
+        Notification n = builder(this, CHANNEL_RUN)
+            .setContentTitle("CacheRunde")
+            .setContentText(text != null ? text : "Route wird berechnet …")
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .build();
+        if (Build.VERSION.SDK_INT >= 29) startForeground(ID_RUN, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+        else startForeground(ID_RUN, n);
+        return START_NOT_STICKY;
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) { return null; }
+}
+`);
+fs.writeFileSync(path.join(javaDir, "KeepAlivePlugin.java"), `package ${javaPkg};
+
+import android.Manifest;
+import android.app.NotificationManager;
+import android.content.Context;
+import android.content.Intent;
+import android.os.Build;
+import com.getcapacitor.JSObject;
+import com.getcapacitor.PermissionState;
+import com.getcapacitor.Plugin;
+import com.getcapacitor.PluginCall;
+import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.CapacitorPlugin;
+import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
+
+@CapacitorPlugin(name = "KeepAlive", permissions = {
+    @Permission(alias = "notifications", strings = { Manifest.permission.POST_NOTIFICATIONS })
+})
+public class KeepAlivePlugin extends Plugin {
+    private boolean notifyAllowed() {
+        return Build.VERSION.SDK_INT < 33 || getPermissionState("notifications") == PermissionState.GRANTED;
+    }
+
+    @PluginMethod
+    public void requestNotify(PluginCall call) {
+        if (notifyAllowed()) { JSObject r = new JSObject(); r.put("granted", true); call.resolve(r); return; }
+        requestPermissionForAlias("notifications", call, "permCallback");
+    }
+
+    @PermissionCallback
+    private void permCallback(PluginCall call) {
+        JSObject r = new JSObject(); r.put("granted", notifyAllowed()); call.resolve(r);
+    }
+
+    @PluginMethod
+    public void start(PluginCall call) {
+        try {
+            Context c = getContext();
+            Intent i = new Intent(c, RoutingService.class);
+            i.putExtra("text", call.getString("text", "Route wird berechnet …"));
+            if (Build.VERSION.SDK_INT >= 26) c.startForegroundService(i); else c.startService(i);
+            call.resolve();
+        } catch (Exception e) { call.reject("Dienst nicht startbar: " + e.getMessage()); }
+    }
+
+    @PluginMethod
+    public void stop(PluginCall call) {
+        try { getContext().stopService(new Intent(getContext(), RoutingService.class)); } catch (Exception e) {}
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void notifyDone(PluginCall call) {
+        Context c = getContext();
+        if (!notifyAllowed()) { call.reject("Benachrichtigungen nicht erlaubt"); return; }
+        RoutingService.channels(c);
+        NotificationManager nm = (NotificationManager) c.getSystemService(Context.NOTIFICATION_SERVICE);
+        nm.notify((int) (System.currentTimeMillis() % 100000), RoutingService.builder(c, RoutingService.CHANNEL_DONE)
+            .setContentTitle(call.getString("title", "CacheRunde"))
+            .setContentText(call.getString("text", ""))
+            .setAutoCancel(true)
+            .build());
+        call.resolve();
+    }
+}
+`);
+
 const mainActivity = path.join(javaDir, "MainActivity.java");
 edit(mainActivity, j => {
   if (j.includes("FileRangePlugin")) return j;
@@ -118,11 +250,12 @@ edit(mainActivity, j => {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(FileRangePlugin.class);
+        registerPlugin(KeepAlivePlugin.class);
         super.onCreate(savedInstanceState);
     }
 }`);
 });
-if (!fs.readFileSync(mainActivity, "utf8").includes("registerPlugin(FileRangePlugin.class)")) {
+if (!fs.readFileSync(mainActivity, "utf8").includes("registerPlugin(KeepAlivePlugin.class)")) {
   console.error("MainActivity konnte nicht angepasst werden:\n" + fs.readFileSync(mainActivity, "utf8"));
   process.exit(1);
 }

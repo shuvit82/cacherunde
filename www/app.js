@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.22.2";
+const APP_VERSION="0.22.3";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -703,8 +703,45 @@ function updateNetworkStatus(){
   refreshSystemStatus().catch(()=>{});
 }
 
+/* Hintergrund: Während langer Berechnungen hält ein Android-Vordergrund-Dienst (Plugin KeepAlive)
+   die App am Leben; ist die App beim Ende nicht sichtbar, kommt eine Benachrichtigung. */
+const bgTask={active:false,title:"",lastText:"",lastSent:0,started:0,watchdog:null};
+function bgWatch(){
+  // Sicherheitsnetz: kommt 4 Minuten lang kein Fortschritt mehr, Dienst still beenden
+  clearTimeout(bgTask.watchdog);
+  bgTask.watchdog=setTimeout(()=>{if(bgTask.active){bgTask.active=false;keepAlive()?.stop().catch(()=>{});}},240000);
+}
+function keepAlive(){return window.CR_API?.isNative?.()?capPlugin("KeepAlive"):null;}
+function bgUpdate(title,text){
+  const k=keepAlive(); if(!k)return;
+  const label=`${title}: ${text||""}`.slice(0,140);
+  bgWatch();
+  if(!bgTask.active){
+    bgTask.active=true;bgTask.title=title;bgTask.started=Date.now();
+    try{if(!localStorage.getItem("cacherunde-notify-asked")){localStorage.setItem("cacherunde-notify-asked","1");k.requestNotify().catch(()=>{});}}catch(e){}
+    k.start({text:label}).catch(()=>{});
+    bgTask.lastText=label;bgTask.lastSent=Date.now();
+    return;
+  }
+  if(label!==bgTask.lastText&&Date.now()-bgTask.lastSent>1500){
+    bgTask.lastText=label;bgTask.lastSent=Date.now();
+    k.start({text:label}).catch(()=>{});
+  }
+}
+function bgEnd(ok,text){
+  const k=keepAlive(); if(!k||!bgTask.active)return;
+  bgTask.active=false;clearTimeout(bgTask.watchdog);
+  k.stop().catch(()=>{});
+  // Nur melden, wenn die App nicht im Vordergrund ist und es länger als ein paar Sekunden dauerte
+  if(document.visibilityState!=="visible"&&Date.now()-bgTask.started>5000){
+    const title=ok?(bgTask.title==="Echtroute"?"Route fertig":`${bgTask.title} fertig`):`${bgTask.title}: Fehler`;
+    k.notifyDone({title,text:text||""}).catch(()=>{});
+  }
+}
+
 function setProgress(percent,text,title="CacheRunde arbeitet …"){
   const box=$("#globalProgress");
+  if(percent<100)bgUpdate(title,text);
   if(!box)return;
   box.classList.remove("hidden");
   $("#progressTitle").textContent=title;
@@ -713,10 +750,12 @@ function setProgress(percent,text,title="CacheRunde arbeitet …"){
   $("#progressText").textContent=text||"";
 }
 function finishProgress(text="Fertig."){
+  bgEnd(true,state.lastFinishText||text);state.lastFinishText=null;
   setProgress(100,text,"Fertig");
   setTimeout(()=>$("#globalProgress")?.classList.add("hidden"),2200);
 }
 function failProgress(text){
+  bgEnd(false,text||"Fehler");
   setProgress(100,text||"Fehler","Vorgang beendet");
   setTimeout(()=>$("#globalProgress")?.classList.add("hidden"),4500);
 }
@@ -1710,6 +1749,7 @@ async function refineRoute(route,button){
 
     renderRoutes("#advancedResults",state.routes,$("#sortBy").value);
     showRouteOnMap(route);
+    state.lastFinishText=`${route.displayName||route.name}: ${route.stats.km.toFixed(1)} km · ${fmtMin(route.stats.totalMin)} · ${route.stats.cacheCount} Caches`;
     finishProgress("Echtroute fertig berechnet.");
 
     // Non-blocking forest analysis
