@@ -1,6 +1,6 @@
 {
   "name": "cacherunde",
-  "version": "0.22.1",
+  "version": "0.22.2",
   "private": true,
   "description": "Geocaching-Rundenfinder – Web-App und Android-App (Capacitor)",
   "scripts": {
@@ -13,6 +13,7 @@
     "@capacitor/core": "latest",
     "@capacitor/file-transfer": "latest",
     "@capacitor/filesystem": "latest",
+    "@capacitor/share": "latest",
     "@capgo/capacitor-inappbrowser": "latest",
     "leaflet": "1.9.4",
     "protomaps-leaflet": "5.1.0"

@@ -4,7 +4,7 @@ const OVERPASS="/api/overpass";
 const ELEVATION="/api/elevation";
 const LANDCOVER="/api/landcover";
 const ROUTER_DELAY_MS=1100;
-const APP_VERSION="0.22.1";
+const APP_VERSION="0.22.2";
 const DATA_VERSION=1;
 const DEFAULT_APP_SETTINGS={
   radius:10,
@@ -290,7 +290,9 @@ function makeRouteFromSeed(seed,component,graph,opts,variant=0){
 
     if(!choices.length)break;
 
-    const pick=choices[Math.min(variant%Math.min(4,choices.length),choices.length-1)].c;
+    // Varianten nur beim ersten Schritt (anderer Einstieg); danach immer den besten Nachbarn,
+    // sonst überspringt die Kette dauerhaft den nächstgelegenen Cache.
+    const pick=(path.length===1?choices[Math.min(variant%Math.min(4,choices.length),choices.length-1)]:choices[0]).c;
 
     // Preliminary planning is an OPEN cache chain. The return to parking is
     // only added during real routing and does not need to contain more caches.
@@ -1278,19 +1280,49 @@ function gpxTextForRoute(r){
   const seq=r.real?.finalSequence||cacheSequence(r);
   const pts=r.real?.geometry?.coordinates?.length?r.real.geometry.coordinates.map(c=>({lon:c[0],lat:c[1]})):r.points;
   const trk=pts.map(p=>`<trkpt lat="${p.lat}" lon="${p.lon}"></trkpt>`).join("");
-  const wp=seq.map(p=>`<wpt lat="${p.lat}" lon="${p.lon}"><name>${esc(p.id)}</name><desc>${esc(p.name)}</desc></wpt>`).join("");
+  const wp=seq.map(p=>`<wpt lat="${p.lat}" lon="${p.lon}"><name>${esc(p.id)}</name><desc>${esc(p.name)}</desc><type>${esc("Geocache|"+(p.type||""))}</type></wpt>`).join("");
   const park=(r.real && validRoutingPoint(r.real.parking))
     ? `<wpt lat="${r.real.parking.lat}" lon="${r.real.parking.lon}"><name>Parking</name><desc>${esc(r.real.parking?.name||"Startpunkt")}</desc></wpt>`
     : "";
-  return `<?xml version="1.0" encoding="UTF-8"?><gpx version="1.1" creator="CacheRunde 0.4.0" xmlns="http://www.topografix.com/GPX/1/1">${park}${wp}<trk><name>${esc(r.displayName||r.name)}</name><trkseg>${trk}</trkseg></trk></gpx>`;
+  return `<?xml version="1.0" encoding="UTF-8"?><gpx version="1.1" creator="CacheRunde ${APP_VERSION}" xmlns="http://www.topografix.com/GPX/1/1">${park}${wp}<trk><name>${esc(r.displayName||r.name)}</name><trkseg>${trk}</trkseg></trk></gpx>`;
 }
-async function shareRouteGPX(r){
-  const text=gpxTextForRoute(r),filename=`${(r.displayName||r.name).replace(/\W+/g,"-").toLowerCase()}.gpx`;
+/* Capacitor-Plugin ohne Bundler holen (gleiches Muster wie offline-map.js) */
+try{const st=document.getElementById("appSubtitle");if(st)st.textContent=`Version ${APP_VERSION} · Echtrouting`;}catch(e){}
+
+function capPlugin(name){
+  const c=window.Capacitor;
+  if(!c)return null;
+  if(c.Plugins&&c.Plugins[name])return c.Plugins[name];
+  if(typeof c.registerPlugin==="function"){try{return c.registerPlugin(name);}catch(e){}}
+  if(typeof c.nativePromise!=="function")return null;
+  return new Proxy({},{get:(_,m)=>m==="then"?undefined:(o=>c.nativePromise(name,m,o||{}))});
+}
+
+/* GPX exportieren: in der App über das Android-Teilen-Menü (Speichern in Dateien/Drive, Öffnen in
+   c:geo, Locus, OsmAnd …); im Browser über Web-Share bzw. Download. Der frühere reine Download-Link
+   funktioniert im Android-WebView nicht. */
+async function shareRouteGPX(r,{download=false}={}){
+  const text=gpxTextForRoute(r);
+  const base=(r.displayName||r.name||"cacherunde").normalize("NFKD").replace(/[\u0300-\u036f]/g,"").replace(/\W+/g,"-").replace(/^-|-$/g,"").toLowerCase()||"cacherunde";
+  const filename=`${base}${r.real?"-echtroute":""}.gpx`;
+  if(window.CR_API?.isNative?.()){
+    const fs=capPlugin("Filesystem"), share=capPlugin("Share");
+    if(!fs||!share){showToast("GPX-Export braucht eine neuere App-Version.","warn",5000);return;}
+    try{
+      const w=await fs.writeFile({path:filename,data:text,directory:"CACHE",encoding:"utf8"});
+      await share.share({title:r.displayName||r.name,text:"CacheRunde GPX",files:[w.uri],dialogTitle:"GPX speichern oder öffnen"});
+    }catch(e){
+      if(!/cancel|abbruch/i.test(String(e?.message||e)))showToast("GPX-Export fehlgeschlagen: "+(e.message||e),"error",6000);
+    }
+    return;
+  }
   const file=new File([text],filename,{type:"application/gpx+xml"});
-  try{
-    if(navigator.canShare?.({files:[file]})){await navigator.share({title:r.displayName||r.name,text:"CacheRunde GPX",files:[file]});return;}
-  }catch(e){if(e.name==="AbortError")return;}
-  const u=URL.createObjectURL(new Blob([text],{type:"application/gpx+xml"}));const a=document.createElement("a");a.href=u;a.download=filename;a.click();URL.revokeObjectURL(u);
+  if(!download){
+    try{
+      if(navigator.canShare?.({files:[file]})){await navigator.share({title:r.displayName||r.name,text:"CacheRunde GPX",files:[file]});return;}
+    }catch(e){if(e.name==="AbortError")return;}
+  }
+  const u=URL.createObjectURL(file);const a=document.createElement("a");a.href=u;a.download=filename;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),2000);
 }
 
 
@@ -1349,6 +1381,65 @@ async function applyManualParking(route,lat,lon,lockSequence=false){
   }
 }
 
+/* ---------- Caches am Weg einsammeln (seit 0.22.2) ----------
+   Die Vorplanung wählt eine Cachekette nach Luftlinie; der Rückweg zum Parkplatz und die echten
+   Wege kommen erst beim Echtrouting dazu. Geeignete Caches, die direkt an diesem Weg liegen,
+   werden danach in der Reihenfolge des Weges eingefügt – solange die Maximalzeit reicht. */
+const ON_ROUTE_M=60;
+function nearestOnLine(coords,p,from=0){
+  // coords: [[lon,lat],...]; Rückgabe: Abstand in m und Index entlang der Linie
+  const kx=111320*Math.cos(p.lat*Math.PI/180), ky=110540;
+  let best={d:Infinity,pos:from};
+  for(let i=Math.max(0,from);i<coords.length-1;i++){
+    const ax=(coords[i][0]-p.lon)*kx, ay=(coords[i][1]-p.lat)*ky;
+    const bx=(coords[i+1][0]-p.lon)*kx, by=(coords[i+1][1]-p.lat)*ky;
+    const dx=bx-ax, dy=by-ay, len2=dx*dx+dy*dy;
+    let t=len2?-(ax*dx+ay*dy)/len2:0; t=Math.max(0,Math.min(1,t));
+    const x=ax+t*dx, y=ay+t*dy, d=Math.hypot(x,y);
+    if(d<best.d)best={d,pos:i+t};
+  }
+  return best;
+}
+function cachesAlongRoute(coords,seq,opts){
+  if(!coords?.length||coords.length<2)return {placed:[],extra:[]};
+  const inRoute=new Set(seq.map(c=>c.id));
+  // Position der vorhandenen Caches entlang des Weges (aufsteigend suchen, Weg kann sich überlagern)
+  let from=0;
+  const placed=seq.map(c=>{
+    const n=nearestOnLine(coords,c,Math.floor(from));
+    from=n.pos;
+    return {c,pos:n.pos,existing:true};
+  });
+  const extra=filteredCaches(opts)
+    .filter(c=>!inRoute.has(c.id)&&!cacheHealth(c).warn)
+    .map(c=>({c,...nearestOnLine(coords,c)}))
+    .filter(x=>x.d<=ON_ROUTE_M);
+  return {placed,extra};
+}
+async function collectCachesOnRoute(parking,seq,geometry,totalSec,opts,status){
+  const {placed,extra}=cachesAlongRoute(geometry,seq,opts);
+  if(!extra?.length)return null;
+  // Zeitbudget: Stoppzeit + kleiner Abstecher (hin und zurück) je Cache, nächstgelegene zuerst
+  const budget=opts.maxTime*60*1.05-totalSec;
+  const perCache=x=>opts.stopTime*60+(2*x.d/1000)/opts.speed*3600;
+  let used=0;
+  const take=[];
+  for(const x of [...extra].sort((a,b)=>a.d-b.d)){
+    if(used+perCache(x)>budget)continue;
+    used+=perCache(x);take.push(x);
+  }
+  if(!take.length)return {skipped:extra.length};
+  const all=[...placed,...take.map(x=>({c:x.c,pos:x.pos,existing:false}))].sort((a,b)=>a.pos-b.pos);
+  const newSeq=all.map(x=>x.c);
+  if(status)status.textContent=`${take.length} Cache(s) direkt am Weg gefunden – Route wird mit ihnen neu berechnet …`;
+  const toFirst=await connectorRoute(parking,newSeq[0]);
+  await sleep(ROUTER_DELAY_MS);
+  const cacheReal=await footRouteSequence(newSeq);
+  await sleep(ROUTER_DELAY_MS);
+  const fromLast=await connectorRoute(newSeq[newSeq.length-1],parking);
+  return {seq:newSeq,added:take.map(x=>x.c),skipped:extra.length-take.length,toFirst,cacheReal,fromLast};
+}
+
 async function refineRoute(route,button){
   const status=$("#routingStatus");
   const lockedIds=lockedSelectionIds(route);
@@ -1394,7 +1485,7 @@ async function refineRoute(route,button){
     if(!finalSeq.length)throw new Error("Cachefolge ist nach der Prüfung leer.");
     if(!cacheReal)throw new Error("Cache-Fußrouting lieferte kein Ergebnis.");
     let maxCacheLegSec=Math.max(0,...(cacheReal.legDurations||[]));
-    const violations=repaired.violations;
+    let violations=repaired.violations;
 
     const repairText=repaired.removed.length
       ? ` · ${repaired.removed.length} Cache(s) entfernt`
@@ -1508,6 +1599,29 @@ async function refineRoute(route,button){
       }
     }
 
+    routingStage="Caches am Weg einsammeln";
+    let collected=null;
+    const mayCollect=!lockedIds.length && !parkingOrderLocked && !route.manualSelectionLocked && route.collectOnRoute!==false;
+    if(mayCollect){
+      setProgress(60,"Suche weitere Caches direkt am Weg …","Echtroute");
+      try{
+        const geo=mergeGeometries(toFirst.geometry,cacheReal.geometry,fromLast.geometry);
+        const secNow=(toFirst.duration||0)+(cacheReal.duration||0)+(fromLast.duration||0)+finalSeq.length*opts.stopTime*60;
+        collected=await collectCachesOnRoute(parking,finalSeq,geo,secNow,opts,status);
+        if(collected?.seq){
+          const secNew=(collected.toFirst.duration||0)+(collected.cacheReal.duration||0)+(collected.fromLast.duration||0)+collected.seq.length*opts.stopTime*60;
+          if(secNew<=opts.maxTime*60*1.08){
+            finalSeq=collected.seq;cacheReal=collected.cacheReal;toFirst=collected.toFirst;fromLast=collected.fromLast;
+            maxCacheLegSec=Math.max(0,...(cacheReal.legDurations||[]));
+            chosenReturnMode="direkt (mit Caches am Weg)";
+            violations=(cacheReal.legDurations||[]).filter(d=>d>opts.maxGap*60).length;
+          }else{
+            collected={skipped:(collected.added?.length||0)+(collected.skipped||0),overTime:true};
+          }
+        }
+      }catch(e){console.warn("Caches am Weg:",e);collected={error:e.message||String(e)};}
+    }
+
     routingStage="Anfahrt berechnen";
     setProgress(65,"Hin- und Rückweg zum Parkplatz werden berechnet …","Echtroute");
     let drive=null;
@@ -1551,7 +1665,7 @@ async function refineRoute(route,button){
       walkingDirection,
       parkingVariantsTested,
       manualParkingSequenceLocked:parkingOrderLocked,
-      cacheFreeReturn:true,
+      cacheFreeReturn:!collected?.added?.length,
       removedCaches:repaired.removed,
       repairReordered:!!repaired.reordered,
       preservedAllCaches:!!repaired.preservedAllCaches,
@@ -1574,6 +1688,8 @@ async function refineRoute(route,button){
       geometry:realGeometry,
       overlapRatio:routeOverlap,
       returnMode:chosenReturnMode,
+      addedOnRoute:(collected?.added||[]).map(c=>c.id),
+      skippedOnRoute:collected?.added?0:(collected?.skipped||0),
       checkedAt:new Date().toISOString()
     };
 
@@ -1711,6 +1827,8 @@ function renderRoutes(container, routes, sortMode="distance"){
         `Gesamtzeit inkl. ${r.stats.cacheCount} × ${getOpts(false).stopTime} min Cachezeit: ${fmtMin(r.real.totalDuration/60)}`+
         `${r.real.manualGapOverride?`<div class="manual-override">Manuell übersteuert: ${violationText||`mindestens eine Cache→Cache-Verbindung über ${getOpts(false).maxGap} Minuten`}.</div>`:""}`+
         `${r.real.preservedAllCaches?`<div class="repair-note">Cachefolge erhalten: problematische Verbindung wurde an den Parkplatz-Schnitt gelegt; alle Caches bleiben in der Runde.</div>`:""}`+
+        `${r.real.addedOnRoute?.length?`<div class="repair-note">✚ ${r.real.addedOnRoute.length} Cache(s) direkt am Weg ergänzt: ${r.real.addedOnRoute.map(escapeHtml).join(", ")}</div>`:""}`+
+        `${r.real.skippedOnRoute?`<div class="repair-note">${r.real.skippedOnRoute} weitere(r) Cache(s) am Weg passen nicht mehr in die Maximalzeit.</div>`:""}`+
         `${r.real.removedCaches?.length?`<div class="repair-note">Auto-Reparatur erst nach Alternativprüfung: ${r.real.removedCaches.length} Cache(s) entfernt (${r.real.removedCaches.map(c=>c.id).join(", ")}). Vorprüfung: ${r.real.preliminary?.cacheCount??"—"} Caches / ca. ${r.real.preliminary?.km?.toFixed?.(1)??"—"} km → Echtroute: ${r.stats.cacheCount} Caches / ${r.stats.km.toFixed(1)} km.</div>`:""}`+
         `${routeHealthHtml(r)}`+
         `${lockedSelectionHtml(r)}`+
@@ -2140,29 +2258,12 @@ function showRouteOnMap(r){
   const elevationBlock=r.real?.elevation
     ? `<div style="width:100%;margin-top:8px"><div class="pill real-badge">Höhenprofil verfügbar</div>${elevationSvg(r.real.elevation)}</div>`
     : `<div style="width:100%;margin-top:8px"><span class="pill warn-badge">Noch kein echtes Höhenprofil</span></div>`;
-  $("#mapInfo").innerHTML=`<div style="width:100%"><strong>${escapeHtml(r.displayName||r.name)} · ${mode}</strong><br><span>${r.stats.km.toFixed(1)} km · ${fmtMin(r.stats.totalMin)} · ${r.stats.cacheCount} Caches · ↑ ${Math.round(r.stats.gain)} m · ↓ ${Math.round(r.stats.loss)} m</span><div class="rule-explain"><strong>Cache-Abstandsregel:</strong> ${getOpts(false).maxGap} Minuten gelten nur zwischen zwei aufeinanderfolgenden Caches. Parkplatz→erster Cache und letzter Cache→Parkplatz sind davon ausgenommen. Der Rückweg nach dem letzten Cache darf vollständig ohne weitere Caches zum Parkplatz führen. Manuell bearbeitete Routen können die Regel auf Wunsch übersteuern.</div>${routeChangeHtml(r)}${routeHealthHtml(r)}${elevationBlock}${routeSequenceHtml(r,seq)}</div>`;
+  $("#mapInfo").innerHTML=`<div style="width:100%"><strong>${escapeHtml(r.displayName||r.name)} · ${mode}</strong><br><span>${r.stats.km.toFixed(1)} km · ${fmtMin(r.stats.totalMin)} · ${r.stats.cacheCount} Caches · ↑ ${Math.round(r.stats.gain)} m · ↓ ${Math.round(r.stats.loss)} m</span><div class="rule-explain"><strong>Cache-Abstandsregel:</strong> ${getOpts(false).maxGap} Minuten gelten nur zwischen zwei aufeinanderfolgenden Caches. Parkplatz→erster Cache und letzter Cache→Parkplatz sind davon ausgenommen. Geeignete Caches, die höchstens 60 m neben dem berechneten Weg liegen (auch auf dem Rückweg), werden automatisch ergänzt, solange die Maximalzeit reicht. Manuell bearbeitete Routen können die Regel auf Wunsch übersteuern.</div>${routeChangeHtml(r)}${routeHealthHtml(r)}${elevationBlock}${routeSequenceHtml(r,seq)}</div>`;
   refreshCacheLayer();
   switchTab("karte");
 }
 
-function downloadRouteGPX(r){
-  const esc=s=>String(s).replace(/[<>&'"]/g,ch=>({"<":"&lt;",">":"&gt;","&":"&amp;","'":"&apos;",'"':"&quot;"}[ch]));
-  const seq=r.real?.finalSequence || cacheSequence(r);
-  let trackPoints;
-  if(r.real?.geometry?.coordinates?.length){
-    trackPoints=r.real.geometry.coordinates.map(c=>({lon:c[0],lat:c[1]}));
-  }else{
-    trackPoints=r.points;
-  }
-  const trkpts=trackPoints.map(p=>`<trkpt lat="${p.lat}" lon="${p.lon}">${Number.isFinite(p.ele)?`<ele>${p.ele}</ele>`:""}</trkpt>`).join("");
-  const cacheWpts=seq.map(p=>`<wpt lat="${p.lat}" lon="${p.lon}"><name>${esc(p.id)}</name><desc>${esc(p.name)}</desc><type>${esc(p.type)}</type></wpt>`).join("");
-  const parkingWpt=(r.real && validRoutingPoint(r.real.parking))
-    ? `<wpt lat="${r.real.parking.lat}" lon="${r.real.parking.lon}"><name>Parking</name><desc>${esc(r.real.parking?.name||"Startpunkt")}</desc><type>Parking Area</type></wpt>`
-    : "";
-  const gpx=`<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="CacheRunde Prototype 0.2.0" xmlns="http://www.topografix.com/GPX/1/1">${parkingWpt}${cacheWpts}<trk><name>${esc(r.name)}</name><trkseg>${trkpts}</trkseg></trk></gpx>`;
-  const blob=new Blob([gpx],{type:"application/gpx+xml"}); const url=URL.createObjectURL(blob);
-  const a=document.createElement("a"); a.href=url; a.download=`${r.name.replace(/\W+/g,"-").toLowerCase()}${r.real?"-echtroute":""}.gpx`; a.click(); URL.revokeObjectURL(url);
-}
+function downloadRouteGPX(r){return shareRouteGPX(r,{download:true});}
 
 async function search(quick=false){
   const host=$(quick?"#quickResults":"#advancedResults");
